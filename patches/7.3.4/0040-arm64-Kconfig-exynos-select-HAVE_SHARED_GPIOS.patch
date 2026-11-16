@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime trim <trim@j7prime.invalid>
+Date: Tue, 17 Nov 2026 03:30:00 +0530
+Subject: [PATCH] arm64: Kconfig: exynos: select HAVE_SHARED_GPIOS
+
+The SM-G610F device tree uses one GPIO (gpd3-6) both as the reset of
+the Wi-Fi SDIO power sequence and as the Wi-Fi node's reset-gpios; with
+shared GPIO support gpiolib hands it out through gpio-shared-proxy
+(loaded on the phone today). The support is only built when a platform
+selects HAVE_SHARED_GPIOS, which on arm64 is only ARCH_QCOM; a config
+for this phone alone (no Qualcomm platform) would silently lose it.
+
+Select HAVE_SHARED_GPIOS for Exynos too. No change for configs that
+already enable ARCH_QCOM (p1, p2).
+
+Origin: new in j7prime (trimmed config t1).
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    Needed by kernel/7.3.4/t1.fragment (keeps GPIO_SHARED and GPIO_SHARED_PROXY). Against v7.3.4.
+
+ arch/arm64/Kconfig.platforms | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/arch/arm64/Kconfig.platforms b/arch/arm64/Kconfig.platforms
+--- a/arch/arm64/Kconfig.platforms
++++ b/arch/arm64/Kconfig.platforms
+@@ -149,6 +149,7 @@ config ARCH_EXYNOS
+ 	select PINCTRL
+ 	select PINCTRL_EXYNOS
+ 	select PM_GENERIC_DOMAINS if PM
++	select HAVE_SHARED_GPIOS
+ 	select SOC_SAMSUNG
+ 	help
+ 	  This enables support for ARMv8 based Samsung Exynos SoC family.
+--
+2.47.0

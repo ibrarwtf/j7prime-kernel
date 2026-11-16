@@ -68,7 +68,9 @@ if [ -n "$trim" ]; then
 		./scripts/kconfig/merge_config.sh -m .config "$tdrop" >/dev/null
 		mk olddefconfig
 	fi
-	yes '' | mk LSMOD="$tlsmod" localmodconfig >"$OUT/localmodconfig.log" 2>&1 || { tail -20 "$OUT/localmodconfig.log"; exit 1; }
+	# streamline_config.pl *executes* an LSMOD file that has the x bit: always hand it a plain copy
+	cp "$tlsmod" ../lsmod.txt && chmod 644 ../lsmod.txt
+	yes '' | mk LSMOD="$(pwd)/../lsmod.txt" localmodconfig >"$OUT/localmodconfig.log" 2>&1 || { tail -20 "$OUT/localmodconfig.log"; exit 1; }
 	./scripts/kconfig/merge_config.sh -m .config "$frag" >/dev/null
 	mk olddefconfig
 	echo "--- j7-trim: $(grep -c '=y$' .config) =y, $(grep -c '=m$' .config) =m after trimming"
