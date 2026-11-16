@@ -2,12 +2,39 @@
 
 Kernel build recipes for the **Samsung Galaxy J7 Prime (SM-G610F, `on7xelte`, Exynos 7870)** running Nura / postmarketOS, built on GitHub Actions.
 
-- Source: [`exynos7870-mainline/linux`](https://gitlab.com/exynos7870-mainline/linux) (branch `exynos7870/7.1` by default).
-- `kernel/base-6.15.config`: the Nura `linux-postmarketos-exynos7870` 6.15 config, used as the starting point (`make olddefconfig`).
-- `kernel/7.1/<build>.fragment`: config deltas per build; `kernel/7.1/on7xelte-<build>.dtsi`: device-tree additions appended to `exynos7870-on7xelte.dts`; `kernel/7.1/patches/<build>/*.patch`: optional patches.
-- Each build also produces `exynos7870-on7xelte-bus.dtb` (i2c@13870000 enabled, no client) for debugging.
+One workflow, `kernel` (`.github/workflows/kernel.yml`), selected with the `mode` input:
 
-Run: Actions → **kernel** → *Run workflow* (`build=b1`). Artifacts: `Image`, DTBs, `modules.tgz`, `config`, `SHA256SUMS`.
+| mode | what it does | artifact |
+|---|---|---|
+| `kernel` (default) | fetches `repo`@`ref`, applies each build id, builds `Image`, modules and the on7xelte DTBs (gcc + ccache, ~20 min cold); then a QEMU `virt` smoke test | `kernel-<id>`: `Image`, DTBs, `modules.tgz`, `config`, `release.txt`, `source.txt`, `SHA256SUMS` |
+| `stock-module` | rebuilds the stock Nura kernel tree (linux 6.15 + `exynos7870-mainline/mainline-patches@5686e3b5`, applied like the pmaports `linux-postmarketos-exynos7870` APKBUILD, clang/LLVM) with `kernel/base-6.15.config`, checks `kernelrelease` = `6.15.0-exynos7870`, builds the requested in-tree modules and verifies their `vermagic` | `stock-modules-6.15.0-exynos7870`: `*.ko`, `*.ko.zst`, `modinfo.txt`, `config`, `SHA256SUMS` |
+| `dtb` | device trees only (same build-id convention), plus decompiled `.dts` and a non-fatal `dtbs_check` (warnings in the job summary) | `dtb-<id>` |
+
+Inputs: `builds` (comma-separated, one matrix job each), `repo` + `ref` (any branch, tag or commit; default `exynos7870-mainline/linux` `exynos7870/7.1`), `base_config` (a file under `kernel/`), `build_dir` (default `kernel/7.1`), `modules` (stock-module: config symbols, default `CONFIG_I2C_CHARDEV`), `full_modules` (stock-module: full `make modules` instead of `modules_prepare` + per-directory build), `qemu`, `release` (default off: publish a GitHub release `<id>-<run_number>` with the same files).
+
+## Adding a build
+
+Create in `kernel/7.1/` (or another `build_dir`):
+- `<id>.fragment`: config lines merged onto the base config. **Every line must survive `olddefconfig`**; the job fails and lists symbols whose value changed (missing dependency, typo).
+- `on7xelte-<id>.dtsi` (optional): appended to `arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts`.
+- `patches/<id>/*.patch` (optional): applied with `git apply`.
+
+If the tree has `i2c@13870000`, an extra `exynos7870-on7xelte-bus.dtb` (that bus enabled, no client) is produced for debugging.
+
+## Running and downloading
+
+```sh
+gh workflow run kernel.yml -f mode=kernel -f builds=b1
+gh workflow run kernel.yml -f mode=dtb -f builds=b1,b2
+gh workflow run kernel.yml -f mode=stock-module -f modules=CONFIG_I2C_CHARDEV
+gh workflow run kernel.yml -f builds=b1 -f repo=https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git -f ref=v6.18.5
+gh run list -w kernel -L 5
+gh run download <run-id> -n kernel-b1
+```
+
+With `release=true` a device can fetch files with plain `curl -LO https://github.com/<owner>/j7prime-kernel/releases/download/<tag>/<file>`.
+
+The QEMU smoke test boots `Image` on `qemu-system-aarch64 -M virt -cpu cortex-a53` with a one-file static `/init` that prints a marker and powers off. The phone config has no PL011/virtio console and is not changed for the test; the pass signal is QEMU exiting through the guest's PSCI power-off (`panic=0` and no `-no-reboot`, so panics and reboot loops time out). It only proves the kernel reaches userspace on generic arm64; it says nothing about phone drivers.
 
 Tested only on our own device, via `kexec -c` with the hardware watchdog armed. Use at your own risk.
 

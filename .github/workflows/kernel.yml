@@ -3,72 +3,127 @@ name: kernel
 on:
   workflow_dispatch:
     inputs:
-      build:
-        description: "build id (folder under kernel/7.1: <id>.fragment, on7xelte-<id>.dtsi)"
+      mode:
+        description: "kernel = Image+modules+DTBs | stock-module = modules for the stock 6.15.0-exynos7870 | dtb = device trees only"
+        type: choice
+        options: [kernel, stock-module, dtb]
+        default: kernel
+      builds:
+        description: "build ids, comma-separated (<dir>/<id>.fragment + on7xelte-<id>.dtsi + patches/<id>/); kernel/dtb modes"
         default: "b1"
+      repo:
+        description: "kernel git URL (kernel/dtb modes)"
+        default: "https://gitlab.com/exynos7870-mainline/linux.git"
       ref:
-        description: "exynos7870-mainline/linux branch"
+        description: "branch, tag or commit (kernel/dtb modes)"
         default: "exynos7870/7.1"
+      base_config:
+        description: "base config file under kernel/"
+        default: "kernel/base-6.15.config"
+      build_dir:
+        description: "directory holding the build ids"
+        default: "kernel/7.1"
+      modules:
+        description: "stock-module: config symbols to build as modules, comma-separated"
+        default: "CONFIG_I2C_CHARDEV"
+      full_modules:
+        description: "stock-module: full `make modules` (slow first run) instead of modules_prepare + per-directory build"
+        type: boolean
+        default: false
+      qemu:
+        description: "kernel mode: QEMU virt boot smoke test"
+        type: boolean
+        default: true
+      release:
+        description: "also publish a GitHub release <build>-<run_number> with the artifacts"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # only used by the opt-in release steps
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  ARCH: arm64
+  CROSS_COMPILE: aarch64-linux-gnu-
+  REPO: ${{ inputs.repo }}
+  REF: ${{ inputs.ref }}
+  BASE_CONFIG: ${{ inputs.base_config }}
+  BUILD_DIR: ${{ inputs.build_dir }}
+  CCACHE_DIR: /home/runner/.cache/ccache
 
 jobs:
-  build:
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      builds: ${{ steps.m.outputs.builds }}
+      key: ${{ steps.m.outputs.key }}
+    steps:
+      - id: m
+        env:
+          B: ${{ inputs.builds }}
+        run: |
+          set -euo pipefail
+          for v in "$BASE_CONFIG" "$BUILD_DIR"; do
+            [[ $v =~ ^kernel/[A-Za-z0-9._/-]+$ && $v != *..* ]] || { echo "::error::'$v' must be a path under kernel/"; exit 1; }
+          done
+          j=$(echo "$B" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | jq -R . | jq -sc .)
+          echo "$j" | jq -r '.[]' | while read -r b; do
+            [[ $b =~ ^[A-Za-z0-9._-]+$ ]] || { echo "::error::bad build id '$b'"; exit 1; }
+          done
+          echo "builds=$j" >> "$GITHUB_OUTPUT"
+          # ccache key component: one cache line per source repo+ref
+          echo "key=$(echo "$REPO@$REF" | sed 's#^https\?://##; s#\.git@#@#; s#[^A-Za-z0-9._@-]#_#g')" >> "$GITHUB_OUTPUT"
+          echo "builds: $j"
+
+  kernel:
+    needs: setup
+    if: inputs.mode == 'kernel'
     runs-on: ubuntu-latest
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.setup.outputs.builds) }}
     env:
-      ARCH: arm64
-      CROSS_COMPILE: aarch64-linux-gnu-
-      B: ${{ inputs.build }}
+      BUILD: ${{ matrix.build }}
     steps:
       - uses: actions/checkout@v4
+      - run: echo "T0=$(date +%s)" >> "$GITHUB_ENV"
 
       - name: Toolchain
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev cpio kmod zstd device-tree-compiler ccache >/dev/null
 
-      - name: Fetch kernel source
-        run: |
-          git clone --depth 1 -b "${{ inputs.ref }}" https://gitlab.com/exynos7870-mainline/linux.git src
-          git -C src log --oneline -1 | tee source.txt
-
-      - name: Apply j7-prime patches and DT additions
-        run: |
-          cd src
-          for p in ../kernel/7.1/patches/$B/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --verbose "$p"; done
-          D=arch/arm64/boot/dts/exynos
-          cat ../kernel/7.1/on7xelte-$B.dtsi >> $D/exynos7870-on7xelte.dts
-          # variant with the S2MU005 i2c bus (i2c@13870000) enabled, no client: the bus-death test
-          cp $D/exynos7870-on7xelte.dts $D/exynos7870-on7xelte-bus.dts
-          printf '\n&{/soc@0/i2c@13870000} {\n\tstatus = "okay";\n\tsamsung,i2c-sda-delay = <100>;\n\tsamsung,i2c-max-bus-freq = <400000>;\n};\n' >> $D/exynos7870-on7xelte-bus.dts
-          echo 'dtb-$(CONFIG_ARCH_EXYNOS) += exynos7870-on7xelte-bus.dtb' >> $D/Makefile
-
-      - name: Configure
-        run: |
-          cd src
-          cp ../kernel/base-6.15.config .config
-          ./scripts/kconfig/merge_config.sh -m .config ../kernel/7.1/$B.fragment
-          make olddefconfig
-          grep -E "LOCALVERSION=|NETCONSOLE=|U_SERIAL_CONSOLE=|I2C_S3C2410=|S3C2410_WATCHDOG=" .config
+      - name: Fetch source, apply build, configure (fails on fragment mismatch)
+        run: SRC=src bash scripts/prepare-tree.sh
 
       - name: ccache
         uses: actions/cache@v4
         with:
-          path: ~/.cache/ccache
-          key: ccache-${{ inputs.ref }}-${{ inputs.build }}-${{ github.run_id }}
+          path: /home/runner/.cache/ccache
+          key: ccache-k-${{ needs.setup.outputs.key }}-${{ matrix.build }}-${{ github.run_id }}
           restore-keys: |
-            ccache-${{ inputs.ref }}-${{ inputs.build }}-
-            ccache-${{ inputs.ref }}-
+            ccache-k-${{ needs.setup.outputs.key }}-${{ matrix.build }}-
+            ccache-k-${{ needs.setup.outputs.key }}-
 
       - name: Build
         run: |
+          set -euo pipefail
           cd src
-          export CCACHE_DIR=~/.cache/ccache CCACHE_MAXSIZE=3G
-          make -j$(nproc) CC="ccache aarch64-linux-gnu-gcc" Image modules dtbs 2>&1 | tail -20
-          ccache -s | tail -5
+          export CCACHE_MAXSIZE=3G
+          ccache -z >/dev/null
+          make -j$(nproc) CC="ccache aarch64-linux-gnu-gcc" Image modules $(cat ../dtbs.txt) 2>&1 | tail -20
+          ccache -s | tee ../ccache.txt | tail -8
           make -s kernelrelease | tee ../release.txt
 
       - name: Package
         run: |
+          set -euo pipefail
           cd src
           mkdir -p ../out/mod
           make -s modules_install INSTALL_MOD_PATH=../out/mod INSTALL_MOD_STRIP=1
@@ -82,6 +137,205 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: kernel-${{ inputs.build }}
+          name: kernel-${{ matrix.build }}
           path: out/
           retention-days: 14
+
+      - name: Release (opt-in)
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$BUILD-${{ github.run_number }}"
+          gh release create "$tag" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "$tag ($(cat release.txt))" --notes-file source.txt
+
+      - name: Summary
+        if: always()
+        run: |
+          hit=$(grep -iE 'hit rate|Hits:' ccache.txt 2>/dev/null | head -1 | tr -s ' ' || true)
+          {
+            echo "### kernel \`$BUILD\`"
+            echo "| release | commit | Image | duration | ccache |"
+            echo "|---|---|---|---|---|"
+            echo "| \`$(cat release.txt 2>/dev/null)\` | \`$(sed -n 's/^commit: //p' source.txt 2>/dev/null | cut -c1-12)\` $REF | $(stat -c %s out/Image 2>/dev/null) B | $(( ($(date +%s) - T0) / 60 )) min | $hit |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  qemu:
+    needs: [setup, kernel]
+    if: ${{ !cancelled() && inputs.mode == 'kernel' && inputs.qemu }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.setup.outputs.builds) }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: kernel-${{ matrix.build }}
+          path: k
+      - name: QEMU tools + /init
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-system-arm gcc-aarch64-linux-gnu cpio >/dev/null
+          mkdir -p rd
+          aarch64-linux-gnu-gcc -static -Os -s -o rd/init scripts/qemu-init.c
+          (cd rd && echo init | cpio -o -H newc --quiet > ../initrd.cpio)
+      - name: Boot on virt
+        run: |
+          # The phone config has no PL011/virtio console. We do not change it; instead the
+          # guest's /init powers off via PSCI, which makes QEMU exit. panic=0 makes a panic
+          # hang (-> timeout), and without -no-reboot a reset reboots forever (-> timeout),
+          # so only "init ran and powered off" exits in time. If the config does have the
+          # PL011 console, the marker printed by /init must also appear on the serial line.
+          if grep -q '^CONFIG_SERIAL_AMBA_PL011_CONSOLE=y' k/config; then CON=1; APP="console=ttyAMA0 earlycon"; else CON=0; APP=""; fi
+          t0=$(date +%s); rc=0
+          timeout 180 qemu-system-aarch64 -M virt -cpu cortex-a53 -smp 2 -m 1G \
+            -kernel k/Image -initrd initrd.cpio -append "$APP panic=0 rdinit=/init" \
+            -display none -monitor none -serial file:serial.log || rc=$?
+          dt=$(( $(date +%s) - t0 ))
+          echo "--- serial (tail):"; tail -40 serial.log || true
+          if [ $rc = 0 ] && { [ $CON = 0 ] || grep -q J7CI-INIT-REACHED serial.log; }; then
+            res="PASS: init reached and powered off after ${dt}s"
+            [ $CON = 0 ] && res="$res (no PL011 console in this config: judged by PSCI power-off, marker not visible)"
+          else
+            res="FAIL: qemu rc=$rc after ${dt}s (124 = timeout: hang/panic/reboot loop before init)"
+          fi
+          echo "$res"
+          echo "### QEMU smoke \`${{ matrix.build }}\`: $res" >> "$GITHUB_STEP_SUMMARY"
+          [[ $res == PASS* ]]
+
+  dtb:
+    needs: setup
+    if: inputs.mode == 'dtb'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.setup.outputs.builds) }}
+    env:
+      BUILD: ${{ matrix.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu bc bison flex libssl-dev device-tree-compiler >/dev/null
+      - name: Fetch source, apply build, configure
+        run: SRC=src bash scripts/prepare-tree.sh
+      - name: Build DTBs
+        run: |
+          set -euo pipefail
+          cd src
+          make -j$(nproc) $(cat ../dtbs.txt)
+          mkdir -p ../out
+          for d in $(cat ../dtbs.txt); do
+            b=$(basename $d .dtb)
+            cp arch/arm64/boot/dts/$d ../out/
+            scripts/dtc/dtc -q -I dtb -O dts -o ../out/$b.decompiled.dts arch/arm64/boot/dts/$d
+          done
+          cp .config ../out/config
+          cp ../source.txt ../out/
+          echo "DTB_T=$(( $(date +%s) - T0 ))" >> "$GITHUB_ENV"
+      - name: dtbs_check (non-fatal)
+        continue-on-error: true
+        run: |
+          python3 -m venv ~/dtv && ~/dtv/bin/pip install -q dtschema yamllint
+          export PATH=~/dtv/bin:$PATH
+          cd src
+          make -j$(nproc) CHECK_DTBS=y exynos/exynos7870-on7xelte.dtb 2>&1 | tee ../out/dtbs_check.txt
+      - name: Package
+        if: always()
+        run: |
+          cd out && sha256sum * > SHA256SUMS; ls -la
+          w=$(grep -c -E 'warning|error|failed' dtbs_check.txt 2>/dev/null || true)
+          {
+            echo "### dtb \`$BUILD\`: \`$(sed -n 's/^commit: //p' ../source.txt | cut -c1-12)\` $REF, DTBs built in ${DTB_T:-?}s, dtbs_check: ${w:-n/a} lines with warnings"
+            echo "<details><summary>dtbs_check output</summary>"; echo; echo '```'
+            grep -E 'warning|error|failed' dtbs_check.txt 2>/dev/null | sed "s#^$PWD/../src/##" | head -200
+            echo '```'; echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dtb-${{ matrix.build }}
+          path: out/
+          retention-days: 14
+      - name: Release (opt-in)
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$BUILD-dtb-${{ github.run_number }}"
+          gh release create "$tag" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$tag" --notes-file source.txt
+
+  stock-module:
+    if: inputs.mode == 'stock-module'
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    env:
+      MODULES: ${{ inputs.modules }}
+      FULL: ${{ inputs.full_modules }}
+      EXPECT_RELEASE: "6.15.0-exynos7870"
+      OUT: ${{ github.workspace }}/out
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "T0=$(date +%s)" >> "$GITHUB_ENV"
+      - name: Toolchain (clang of the same major as the stock kernel)
+        run: |
+          set -euo pipefail
+          v=$(sed -n 's/^CONFIG_CLANG_VERSION=//p' "$BASE_CONFIG"); v=$((v / 10000))
+          echo "stock kernel was built with clang $v ($(sed -n 's/^CONFIG_CC_VERSION_TEXT=//p' "$BASE_CONFIG"))"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev kmod zstd ccache dwarves lsb-release wget gnupg software-properties-common >/dev/null
+          if ! command -v clang-$v >/dev/null; then
+            wget -q https://apt.llvm.org/llvm.sh
+            sudo bash llvm.sh $v >/dev/null || echo "::warning::clang-$v not available from apt.llvm.org"
+          fi
+          if ! command -v clang-$v >/dev/null; then
+            v=$(ls /usr/bin/clang-[0-9]* | sed 's/.*clang-//' | sort -n | tail -1)
+            echo "::warning::falling back to clang-$v"
+          fi
+          sudo apt-get install -y -qq lld-$v llvm-$v >/dev/null || true
+          clang-$v --version | head -1
+          echo "LLVMSUFFIX=-$v" >> "$GITHUB_ENV"
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/ccache
+          key: ccache-stock-6.15-5686e3b5-${{ inputs.full_modules }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-stock-6.15-5686e3b5-${{ inputs.full_modules }}-
+            ccache-stock-6.15-5686e3b5-
+      - name: Rebuild stock tree + modules, verify vermagic
+        run: |
+          export CCACHE_MAXSIZE=4G
+          ccache -z >/dev/null
+          bash scripts/stock-module.sh
+      - name: Package
+        if: always()
+        run: |
+          cd out 2>/dev/null && sha256sum * > SHA256SUMS && ls -la || true
+          {
+            echo "### stock-module (\`$MODULES\`, full=$FULL), $(( ($(date +%s) - T0) / 60 )) min"
+            echo "expected vermagic: \`$(cat ~/stock/vermagic.txt 2>/dev/null)\`"; echo
+            echo "| module | vermagic | size |"; echo "|---|---|---|"
+            cat ~/stock/rows.md 2>/dev/null
+            echo; echo '```'; cat source.txt 2>/dev/null; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: stock-modules-6.15.0-exynos7870
+          path: out/
+          retention-days: 30
+      - name: Release (opt-in)
+        if: inputs.release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="stock-6.15.0-exynos7870-${{ github.run_number }}"
+          gh release create "$tag" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$tag" --notes-file out/source.txt
