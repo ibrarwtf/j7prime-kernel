@@ -1,0 +1,33 @@
+Subject: [PATCH 1/4] arm64: dts: exynos7870-on7xelte: give the TD4300 touch more time after reset
+
+Origin: j7prime touch investigation (not upstream). Base: Linux v7.3.4.
+
+On every boot (6.15 and 7.3.4, with and without the DRM panel driver) the
+rmi4 core soft-resets the TD4300 TDDI through F01 and waits
+syna,reset-delay-ms (200 ms) before scanning the functions. 200 ms later the
+chip still answers with transient data:
+  rmi4_f34: Unrecognized bootloader version: 228 (\xe4) 186 (\xba)   (184 on another boot)
+  rmi4_f01: Device was reset during configuration process, status: 0x1!
+  rmi4_f12: Failed to read the Query Register Descriptor: -5
+The F34 bytes change between boots, the F01 "configured" bit written 2 ms
+earlier is gone again and the F12 descriptor size is out of range: the
+register file is not stable yet. Samsung's own td4x00 driver never soft-resets
+the chip at probe, so 200 ms was never exercised there either.
+
+This is the DT-only half of the fix and the cheapest test: it can be applied
+to an existing DTB with
+  fdtput -t i <dtb> /soc@0/i2c@13840000/touchscreen@70 syna,reset-delay-ms 1000
+1000 ms is a deliberately generous test value (rmi4 busy-waits it with mdelay
+once per probe); shorten it once the real recovery time is measured.
+---
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -414,7 +414,7 @@
+ 		pinctrl-names = "default";
+ 		pinctrl-0 = <&touch_irq>;
+ 
+-		syna,reset-delay-ms = <200>;
++		syna,reset-delay-ms = <1000>;
+ 		syna,startup-delay-ms = <200>;
+ 
+ 		rmi4-f01@1 {

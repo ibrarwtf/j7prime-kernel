@@ -1,0 +1,25 @@
+Subject: [PATCH 4/4] Input: synaptics-rmi4 - f01: don't dereference F01 data when F01 failed to probe
+
+Origin: j7prime touch investigation (not upstream). Base: Linux v7.3.4.
+
+When F01 fails to probe, rmi_driver_probe() still registers the input device
+and names it with rmi_f01_get_product_ID(), which dereferences the F01
+driver data that was never set (NULL + offset). vsprintf catches the bad
+pointer and the device shows up as
+  input: Synaptics (efault) as .../1-0070/rmi4-00/input/input1
+Return a fixed string instead so the name is meaningful and no bad pointer
+is passed around.
+---
+--- a/drivers/input/rmi4/rmi_f01.c
++++ b/drivers/input/rmi4/rmi_f01.c
+@@ -265,6 +265,10 @@
+ {
+ 	struct f01_data *f01 = dev_get_drvdata(&fn->dev);
+ 
++	/* F01 failed to probe: there is no product ID to report. */
++	if (!f01)
++		return "RMI4 (F01 not bound)";
++
+ 	return f01->properties.product_id;
+ }
+ 
