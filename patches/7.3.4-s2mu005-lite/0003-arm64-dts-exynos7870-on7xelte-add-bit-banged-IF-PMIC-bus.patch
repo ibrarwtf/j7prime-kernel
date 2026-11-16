@@ -21,7 +21,7 @@ diff --git a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts b/arch/arm64/boo
 +	 * bringing up that controller hangs this phone. Bit-bang the bus
 +	 * instead and keep the hardware controller disabled.
 +	 */
-+	i2c-gpio-ifpmic {
++	i2c-ifpmic {
 +		compatible = "i2c-gpio";
 +		sda-gpios = <&gpc1 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
 +		scl-gpios = <&gpc1 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
