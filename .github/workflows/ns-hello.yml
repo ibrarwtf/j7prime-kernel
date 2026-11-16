@@ -6,7 +6,7 @@ on:
     branches: [ns-hello]
 jobs:
   hello:
-    runs-on: namespace-profile-kernelbuilds
+    runs-on: nscloud-ubuntu-24.04-arm64-8x16
     timeout-minutes: 10
     steps:
       - name: Hello
