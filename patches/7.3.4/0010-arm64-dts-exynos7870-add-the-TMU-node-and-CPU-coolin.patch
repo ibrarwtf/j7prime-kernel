@@ -1,0 +1,130 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p2 <p2@j7prime.invalid>
+Date: Mon, 16 Nov 2026 15:53:59 +0530
+Subject: [PATCH 07/10] arm64: dts: exynos7870: add the TMU node and CPU
+ cooling cells
+
+Add the single thermal sensor of the SoC (TEM1455X at 0x10130000,
+GIC SPI 435) with its six CMU_PERI clocks, disabled by default: the
+driver refuses to probe without a thermal zone that has a critical
+trip, and the zone with its cooling maps depends on the board's CPU
+operating points, so boards enable the node together with their zone.
+
+Mark all CPUs as cooling devices (#cooling-cells), so that a board
+thermal zone can throttle the cpufreq policies of both clusters.
+
+Origin: j7prime p2 series. TMU node taken from Alessandro Fontana's
+linux-exynos7870 gtaxlwifi/7.3 exynos7870.dtsi (d1979ff14a1d), changed
+to status "disabled" with the thermal zone moved to the board file.
+The same node (with the driver from d52432794747) read 46 C idle and
+52 C under load on an SM-G610F with a 6.15 kernel.
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    Origin: new in the j7prime p2 series for v7.3.4 (see the Origin line in the message).
+
+ arch/arm64/boot/dts/exynos/exynos7870.dtsi | 34 ++++++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870.dtsi b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+index 859db6b..9a39f49 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7870.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+@@ -74,6 +74,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x0>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 			clocks = <&cmu_cpucl0 CLK_CLUSTER0_SCLK>;
+ 			clock-names = "cluster0_clk";
+ 		};
+@@ -83,6 +84,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x1>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu2: cpu@2 {
+@@ -90,6 +92,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x2>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu3: cpu@3 {
+@@ -97,6 +100,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x3>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu4: cpu@100 {
+@@ -104,6 +108,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x100>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 			clocks = <&cmu_cpucl1 CLK_CLUSTER1_SCLK>;
+ 			clock-names = "cluster1_clk";
+ 		};
+@@ -113,6 +118,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x101>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu6: cpu@102 {
+@@ -120,6 +126,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x102>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 		};
+ 
+ 		cpu7: cpu@103 {
+@@ -127,6 +134,7 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x103>;
+ 			enable-method = "psci";
++			#cooling-cells = <2>;
+ 		};
+ 	};
+ 
+@@ -155,6 +163,32 @@
+ 			reg = <0x10100000 0x100>;
+ 		};
+ 
++		/*
++		 * One physical sensor (TEM1455X) for the whole SoC: the three
++		 * vendor instances (CPUCL0/CPUCL1/G3D) share this base. The
++		 * register file needs the CPUCL0 APB clock, and gating a sensor
++		 * clock while the block is live hangs the interconnect, so the
++		 * driver keeps all six gates enabled.
++		 */
++		tmu: thermal-sensor@10130000 {
++			compatible = "samsung,exynos7870-tmu";
++			reg = <0x10130000 0x200>;
++			interrupts = <GIC_SPI 435 IRQ_TYPE_LEVEL_HIGH>;
++			clock-names = "tmu_cpucl0_apbif", "tmu_cpucl1_apbif",
++				      "tmu_apbif", "tmu_cpucl0_sclk",
++				      "tmu_cpucl1_sclk", "tmu_sclk";
++			clocks = <&cmu_peri CLK_GOUT_PERI_SFRIF_TMU_CPUCL0_PCLK>,
++				 <&cmu_peri CLK_GOUT_PERI_SFRIF_TMU_CPUCL1_PCLK>,
++				 <&cmu_peri CLK_GOUT_PERI_SFRIF_TMU_PCLK>,
++				 <&cmu_peri CLK_GOUT_PERI_TMU_CPUCL0_CLK>,
++				 <&cmu_peri CLK_GOUT_PERI_TMU_CPUCL1_CLK>,
++				 <&cmu_peri CLK_GOUT_PERI_TMU_CLK>;
++			#thermal-sensor-cells = <0>;
++
++			/* needs a board thermal zone with a critical trip */
++			status = "disabled";
++		};
++
+ 		cmu_peri: clock-controller@101f0000 {
+ 			compatible = "samsung,exynos7870-cmu-peri";
+ 			reg = <0x101f0000 0x1000>;

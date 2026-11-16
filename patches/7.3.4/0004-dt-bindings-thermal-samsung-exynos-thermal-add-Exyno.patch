@@ -1,0 +1,81 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p2 <p2@j7prime.invalid>
+Date: Mon, 16 Nov 2026 15:53:23 +0530
+Subject: [PATCH 01/10] dt-bindings: thermal: samsung,exynos-thermal: add
+ Exynos7870 TMU
+
+The Exynos7870 has one TMU block (TEM1455X sensor) at 0x10130000 which
+needs six CMU_PERI gates: the APB clocks of the CPUCL0, CPUCL1 and TMU
+register files and the three matching sensor clocks. The driver keeps
+all of them enabled for the life of the device (gating one of them
+while the block is live hangs the interconnect).
+
+Document the compatible and its six clocks, so that the SoC DT node
+added later in this series validates.
+
+Origin: j7prime p2 series (new for 7.3.4); clock list as used by
+Alessandro Fontana's linux-exynos7870 gtaxlwifi/7.3 exynos7870.dtsi.
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    Origin: new in the j7prime p2 series for v7.3.4 (see the Origin line in the message).
+
+ .../thermal/samsung,exynos-thermal.yaml       | 31 +++++++++++++++++--
+ 1 file changed, 29 insertions(+), 2 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/thermal/samsung,exynos-thermal.yaml b/Documentation/devicetree/bindings/thermal/samsung,exynos-thermal.yaml
+index 3f333db..881af78 100644
+--- a/Documentation/devicetree/bindings/thermal/samsung,exynos-thermal.yaml
++++ b/Documentation/devicetree/bindings/thermal/samsung,exynos-thermal.yaml
+@@ -27,14 +27,15 @@ properties:
+       - samsung,exynos5420-tmu-ext-triminfo
+       - samsung,exynos5433-tmu
+       - samsung,exynos7-tmu
++      - samsung,exynos7870-tmu
+ 
+   clocks:
+     minItems: 1
+-    maxItems: 3
++    maxItems: 6
+ 
+   clock-names:
+     minItems: 1
+-    maxItems: 3
++    maxItems: 6
+ 
+   interrupts:
+     description: |
+@@ -120,6 +121,32 @@ allOf:
+           minItems: 1
+           maxItems: 1
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            const: samsung,exynos7870-tmu
++    then:
++      properties:
++        clocks:
++          items:
++            - description: APB clock of the CPUCL0 sensor registers.
++            - description: APB clock of the CPUCL1 sensor registers.
++            - description: APB clock of the TMU block.
++            - description: Special clock of the CPUCL0 sensor.
++            - description: Special clock of the CPUCL1 sensor.
++            - description: Special clock of the TMU block.
++        clock-names:
++          items:
++            - const: tmu_cpucl0_apbif
++            - const: tmu_cpucl1_apbif
++            - const: tmu_apbif
++            - const: tmu_cpucl0_sclk
++            - const: tmu_cpucl1_sclk
++            - const: tmu_sclk
++        reg:
++          maxItems: 1
++
+   - if:
+       properties:
+         compatible:

@@ -1,0 +1,319 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alessandro Fontana <alessandro.fontana@pm.me>
+Date: Sat, 29 Aug 2026 15:57:49 +0000
+Subject: [PATCH 05/10] clk: samsung: clk-cpu: add Exynos7870 CPU clock layout
+
+For CPU DVFS purposes the Exynos7870 behaves like an Exynos850: there
+is no armclk divider inside CMU_CPUCLx (the cores are fed straight from
+the CLK_CPUCLx mux) and the alternate parent speed is adjusted through
+the CLKCMU_CPUCLx_SWITCH divider, which sits in CMU_MIF on this SoC.
+That gives the 800/400/266/200 MHz park rates the vendor DFS driver
+uses.
+
+The register format however predates the Exynos850: the mux select is
+on bit 12, with a separate MUX_STAT register 0x400 above the mux whose
+field [13:12] reads sel+1 once stable, and none of the existing layouts
+can drive it (the Exynos5433 one would write its divider values into
+what are status registers here).
+
+Add CPUCLK_LAYOUT_E7870: Exynos850-style pre/post rate handlers with
+the Exynos7870 mux and status accessors, no divider programming (no
+divider on the CPU path depends on the level), and an alternate parent
+helper with one extra parent hop for the gate at the CMU_MIF boundary.
+
+Register cluster0_clk and cluster1_clk with the 13 levels usable on
+this SoC, 1586000 down to 342875 kHz: 2002 and 1924 MHz are disabled in
+the ECT DVFS block, and 1794 and 1690 MHz have no valid voltage in the
+fused ASV table.  The pre-rate handler rejects any rate that is not
+listed, so this table is what keeps the CPUs off those levels.
+
+Assisted-by: LLM
+Signed-off-by: Alessandro Fontana <alessandro.fontana@pm.me>
+---
+
+Notes:
+    Origin: https://github.com/alessandro-fontana/linux-exynos7870 commit f2072e926937 (branch gtaxlwifi/7.3). Port to v7.3.4: applied unchanged (git am, no fuzz).
+
+ drivers/clk/samsung/clk-cpu.c        | 164 +++++++++++++++++++++++++++
+ drivers/clk/samsung/clk-cpu.h        |   2 +
+ drivers/clk/samsung/clk-exynos7870.c |  45 ++++++++
+ 3 files changed, 211 insertions(+)
+
+diff --git a/drivers/clk/samsung/clk-cpu.c b/drivers/clk/samsung/clk-cpu.c
+index 37cf475..2425d52 100644
+--- a/drivers/clk/samsung/clk-cpu.c
++++ b/drivers/clk/samsung/clk-cpu.c
+@@ -564,6 +564,165 @@ static int exynos850_cpuclk_post_rate_change(struct clk_notifier_data *ndata,
+ 	return exynos850_alt_parent_set_max_rate(alt_parent, 0);
+ }
+ 
++
++/* ---- Exynos7870 ----------------------------------------------------------- */
++
++#define E7870_MUX_SEL		BIT(12)
++#define E7870_MUX_STAT_SHIFT	12
++#define E7870_MUX_STAT_MASK	GENMASK(1, 0)
++/* MUX_STAT field reads (selected parent + 1) once the mux has stabilized */
++#define E7870_MUX_STAT_PLL	1
++#define E7870_MUX_STAT_SWITCH	2
++/* Max time for the parking divider to settle, usec */
++#define E7870_DIV_STAB_TIME	100
++/* OSCCLK clock rate, Hz */
++#define E7870_OSCCLK		(26 * MHZ)
++
++static const struct exynos_cpuclk_regs e7870_cpuclk_regs = {
++	.mux_sel	= 0x208,
++	.mux_stat	= 0x608,
++};
++
++/*
++ * Set the alternate parent rate to "rate" or less (0 selects the maximum).
++ *
++ * Exynos7870 has no divider for the CPU clock inside CMU_CPUCLx: the cores
++ * are fed straight from the CLK_CPUCLx mux output, so - as on Exynos850 -
++ * the CLKCMU_CPUCLx_SWITCH divider (in CMU_MIF on this SoC) is used to
++ * adjust the alternate parent speed. This gives the same 800/400/266/200 MHz
++ * park rates the vendor DFS driver uses (dfscpuclx_switches[]).
++ *
++ * The chain from alt_parent (MUX_CLKCMU_CPUCLx_SWITCH_USER in CMU_CPUCLx)
++ * upwards has one hop more than the Exynos850 equivalent because of the
++ * gate sitting at the CMU boundary:
++ *   user mux -> gate (CMU_MIF) -> divider (CMU_MIF) -> bus_pll/2 (800 MHz)
++ */
++static int exynos7870_alt_parent_set_max_rate(const struct clk_hw *alt_parent,
++					      unsigned long rate)
++{
++	struct clk_hw *clk_gate, *clk_div, *clk_divp;
++	unsigned long divp_rate, div_rate, div;
++	int ret;
++
++	/* Gate at the CMU_MIF boundary */
++	clk_gate = clk_hw_get_parent(alt_parent);
++	if (!clk_gate)
++		return -ENOENT;
++	/* CLKCMU_CPUCLx_SWITCH divider in CMU_MIF */
++	clk_div = clk_hw_get_parent(clk_gate);
++	if (!clk_div)
++		return -ENOENT;
++	/* Divider input clock (bus_pll/2) */
++	clk_divp = clk_hw_get_parent(clk_div);
++	if (!clk_divp)
++		return -ENOENT;
++	divp_rate = clk_hw_get_rate(clk_divp);
++	if (!divp_rate)
++		return -EINVAL;
++
++	/* Calculate new alt_parent rate for integer divider value */
++	if (rate == 0)
++		div = 1;
++	else
++		div = DIV_ROUND_UP(divp_rate, rate);
++	div_rate = DIV_ROUND_UP(divp_rate, div);
++	/* The CLKCMU_CPUCLx_SWITCH divider field is only 2 bits wide */
++	WARN_ON(div > 4);
++
++	/* alt_parent will propagate this change up to the divider */
++	ret = clk_set_rate(alt_parent->clk, div_rate);
++	if (ret)
++		return ret;
++	udelay(E7870_DIV_STAB_TIME);
++
++	return 0;
++}
++
++/* Handler for pre-rate change notification from parent clock */
++static int exynos7870_cpuclk_pre_rate_change(struct clk_notifier_data *ndata,
++					     struct exynos_cpuclk *cpuclk)
++{
++	const struct exynos_cpuclk_cfg_data *cfg_data = cpuclk->cfg;
++	const struct exynos_cpuclk_regs * const regs = cpuclk->chip->regs;
++	const struct clk_hw *alt_parent = cpuclk->alt_parent;
++	void __iomem *base = cpuclk->base;
++	unsigned long alt_prate = clk_hw_get_rate(alt_parent);
++	unsigned long flags;
++	u32 mux_reg;
++	int ret;
++
++	/* No actions are needed when switching to or from OSCCLK parent */
++	if (ndata->new_rate == E7870_OSCCLK || ndata->old_rate == E7870_OSCCLK)
++		return 0;
++
++	/*
++	 * Sanity check: the target rate must be listed in the configuration
++	 * data. The divider fields are unused on this SoC: no divider on the
++	 * CPU path is level-dependent, and the one level-dependent divider in
++	 * the ECT (HPM, an unused sensor) is deliberately left at its boot
++	 * value - see the divider comment in clk-exynos7870.c.
++	 */
++	while ((cfg_data->prate * 1000) != ndata->new_rate) {
++		if (cfg_data->prate == 0)
++			return -EINVAL;
++		cfg_data++;
++	}
++
++	/*
++	 * If the old parent clock speed is less than the clock speed of
++	 * the alternate parent, then it should be ensured that at no point
++	 * the armclk speed is more than the old_prate until the PLL relock
++	 * is complete.
++	 */
++	if (alt_prate > ndata->old_rate || ndata->old_rate > ndata->new_rate) {
++		unsigned long tmp_rate = min(ndata->old_rate, ndata->new_rate);
++
++		ret = exynos7870_alt_parent_set_max_rate(alt_parent, tmp_rate);
++		if (ret)
++			return ret;
++	}
++
++	spin_lock_irqsave(cpuclk->lock, flags);
++
++	/* Select the alternate parent */
++	mux_reg = readl(base + regs->mux_sel);
++	writel(mux_reg | E7870_MUX_SEL, base + regs->mux_sel);
++	wait_until_mux_stable(base + regs->mux_stat, E7870_MUX_STAT_SHIFT,
++			      E7870_MUX_STAT_MASK, E7870_MUX_STAT_SWITCH);
++
++	spin_unlock_irqrestore(cpuclk->lock, flags);
++
++	return 0;
++}
++
++/* Handler for post-rate change notification from parent clock */
++static int exynos7870_cpuclk_post_rate_change(struct clk_notifier_data *ndata,
++					      struct exynos_cpuclk *cpuclk)
++{
++	const struct exynos_cpuclk_regs * const regs = cpuclk->chip->regs;
++	const struct clk_hw *alt_parent = cpuclk->alt_parent;
++	void __iomem *base = cpuclk->base;
++	unsigned long flags;
++	u32 mux_reg;
++
++	/* No actions are needed when switching to or from OSCCLK parent */
++	if (ndata->new_rate == E7870_OSCCLK || ndata->old_rate == E7870_OSCCLK)
++		return 0;
++
++	spin_lock_irqsave(cpuclk->lock, flags);
++
++	/* Select main parent (PLL) for mux */
++	mux_reg = readl(base + regs->mux_sel);
++	writel(mux_reg & ~E7870_MUX_SEL, base + regs->mux_sel);
++	wait_until_mux_stable(base + regs->mux_stat, E7870_MUX_STAT_SHIFT,
++			      E7870_MUX_STAT_MASK, E7870_MUX_STAT_PLL);
++
++	spin_unlock_irqrestore(cpuclk->lock, flags);
++
++	/* Set alt_parent rate back to max */
++	return exynos7870_alt_parent_set_max_rate(alt_parent, 0);
++}
++
+ /* -------------------------------------------------------------------------- */
+ 
+ /* Common round rate callback usable for all types of CPU clocks */
+@@ -638,6 +797,11 @@ static const struct exynos_cpuclk_chip exynos_clkcpu_chips[] = {
+ 		.pre_rate_cb	= exynos850_cpuclk_pre_rate_change,
+ 		.post_rate_cb	= exynos850_cpuclk_post_rate_change,
+ 	},
++	[CPUCLK_LAYOUT_E7870] = {
++		.regs		= &e7870_cpuclk_regs,
++		.pre_rate_cb	= exynos7870_cpuclk_pre_rate_change,
++		.post_rate_cb	= exynos7870_cpuclk_post_rate_change,
++	},
+ };
+ 
+ /* helper function to register a CPU clock */
+diff --git a/drivers/clk/samsung/clk-cpu.h b/drivers/clk/samsung/clk-cpu.h
+index 8928436..bd80481 100644
+--- a/drivers/clk/samsung/clk-cpu.h
++++ b/drivers/clk/samsung/clk-cpu.h
+@@ -19,12 +19,14 @@
+  * @CPUCLK_LAYOUT_E5433: Exynos5433 compatible layout
+  * @CPUCLK_LAYOUT_E850_CL0: Exynos850 cluster 0 compatible layout
+  * @CPUCLK_LAYOUT_E850_CL1: Exynos850 cluster 1 compatible layout
++ * @CPUCLK_LAYOUT_E7870: Exynos7870 compatible layout (both clusters)
+  */
+ enum exynos_cpuclk_layout {
+ 	CPUCLK_LAYOUT_E4210,
+ 	CPUCLK_LAYOUT_E5433,
+ 	CPUCLK_LAYOUT_E850_CL0,
+ 	CPUCLK_LAYOUT_E850_CL1,
++	CPUCLK_LAYOUT_E7870,
+ };
+ 
+ /**
+diff --git a/drivers/clk/samsung/clk-exynos7870.c b/drivers/clk/samsung/clk-exynos7870.c
+index 6dee959..7e366fc 100644
+--- a/drivers/clk/samsung/clk-exynos7870.c
++++ b/drivers/clk/samsung/clk-exynos7870.c
+@@ -917,6 +917,40 @@ static const struct samsung_gate_clock cpucl0_gate_clks[] __initconst = {
+ 	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
+ };
+ 
++
++/*
++ * prate values (kHz) must match the PLL rate table above; div0/div1 are
++ * unused by the Exynos7870 clk-cpu layout (no divider programming, see
++ * the divider comment above the cpucl0_div_clks table).
++ *
++ * Only the 13 usable levels are listed: the ECT DVFS block disables
++ * 2002/1924, and 1794/1690 have no valid voltage in the fused ASV table.
++ * The clk-cpu pre-rate handler rejects any rate not listed here, so this
++ * table is what keeps the CPUs off those levels.
++ */
++static const struct exynos_cpuclk_cfg_data exynos7870_cluster_clk_d[] __initconst = {
++	{ 1586000, 0, 0 },
++	{ 1482000, 0, 0 },
++	{ 1352000, 0, 0 },
++	{ 1248000, 0, 0 },
++	{ 1144000, 0, 0 },
++	{ 1014000, 0, 0 },
++	{ 902200, 0, 0 },
++	{ 838500, 0, 0 },
++	{ 756600, 0, 0 },
++	{ 676000, 0, 0 },
++	{ 546000, 0, 0 },
++	{ 448500, 0, 0 },
++	{ 342875, 0, 0 },
++	{ 0 }
++};
++
++static const struct samsung_cpu_clock cpucl0_cpu_clks[] __initconst = {
++	CPU_CLK(CLK_CLUSTER0_SCLK, "cluster0_clk", CLK_GOUT_CPUCL0_MUX,
++		CLK_MOUT_CPUCL0_SWITCH_USER, 0, 0x0, CPUCLK_LAYOUT_E7870,
++		exynos7870_cluster_clk_d),
++};
++
+ static const struct samsung_cmu_info cpucl0_cmu_info __initconst = {
+ 	.pll_clks		= cpucl0_pll_clks,
+ 	.nr_pll_clks		= ARRAY_SIZE(cpucl0_pll_clks),
+@@ -926,6 +960,8 @@ static const struct samsung_cmu_info cpucl0_cmu_info __initconst = {
+ 	.nr_div_clks		= ARRAY_SIZE(cpucl0_div_clks),
+ 	.gate_clks		= cpucl0_gate_clks,
+ 	.nr_gate_clks		= ARRAY_SIZE(cpucl0_gate_clks),
++	.cpu_clks		= cpucl0_cpu_clks,
++	.nr_cpu_clks		= ARRAY_SIZE(cpucl0_cpu_clks),
+ 	.clk_regs		= cpucl0_clk_regs,
+ 	.nr_clk_regs		= ARRAY_SIZE(cpucl0_clk_regs),
+ 	.nr_clk_ids		= CPUCL0_NR_CLK,
+@@ -1061,6 +1097,13 @@ static const struct samsung_gate_clock cpucl1_gate_clks[] __initconst = {
+ 	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
+ };
+ 
++
++static const struct samsung_cpu_clock cpucl1_cpu_clks[] __initconst = {
++	CPU_CLK(CLK_CLUSTER1_SCLK, "cluster1_clk", CLK_GOUT_CPUCL1_MUX,
++		CLK_MOUT_CPUCL1_SWITCH_USER, 0, 0x0, CPUCLK_LAYOUT_E7870,
++		exynos7870_cluster_clk_d),
++};
++
+ static const struct samsung_cmu_info cpucl1_cmu_info __initconst = {
+ 	.pll_clks		= cpucl1_pll_clks,
+ 	.nr_pll_clks		= ARRAY_SIZE(cpucl1_pll_clks),
+@@ -1070,6 +1113,8 @@ static const struct samsung_cmu_info cpucl1_cmu_info __initconst = {
+ 	.nr_div_clks		= ARRAY_SIZE(cpucl1_div_clks),
+ 	.gate_clks		= cpucl1_gate_clks,
+ 	.nr_gate_clks		= ARRAY_SIZE(cpucl1_gate_clks),
++	.cpu_clks		= cpucl1_cpu_clks,
++	.nr_cpu_clks		= ARRAY_SIZE(cpucl1_cpu_clks),
+ 	.clk_regs		= cpucl1_clk_regs,
+ 	.nr_clk_regs		= ARRAY_SIZE(cpucl1_clk_regs),
+ 	.nr_clk_ids		= CPUCL1_NR_CLK,
