@@ -1,0 +1,87 @@
+name: kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      build:
+        description: "build id (folder under kernel/7.1: <id>.fragment, on7xelte-<id>.dtsi)"
+        default: "b1"
+      ref:
+        description: "exynos7870-mainline/linux branch"
+        default: "exynos7870/7.1"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      ARCH: arm64
+      CROSS_COMPILE: aarch64-linux-gnu-
+      B: ${{ inputs.build }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu bc bison flex libssl-dev libelf-dev cpio kmod zstd device-tree-compiler ccache >/dev/null
+
+      - name: Fetch kernel source
+        run: |
+          git clone --depth 1 -b "${{ inputs.ref }}" https://gitlab.com/exynos7870-mainline/linux.git src
+          git -C src log --oneline -1 | tee source.txt
+
+      - name: Apply j7-prime patches and DT additions
+        run: |
+          cd src
+          for p in ../kernel/7.1/patches/$B/*.patch; do [ -e "$p" ] || continue; echo "applying $p"; git apply --verbose "$p"; done
+          D=arch/arm64/boot/dts/exynos
+          cat ../kernel/7.1/on7xelte-$B.dtsi >> $D/exynos7870-on7xelte.dts
+          # variant with the S2MU005 i2c bus (i2c@13870000) enabled, no client: the bus-death test
+          cp $D/exynos7870-on7xelte.dts $D/exynos7870-on7xelte-bus.dts
+          printf '\n&{/soc@0/i2c@13870000} {\n\tstatus = "okay";\n\tsamsung,i2c-sda-delay = <100>;\n\tsamsung,i2c-max-bus-freq = <400000>;\n};\n' >> $D/exynos7870-on7xelte-bus.dts
+          echo 'dtb-$(CONFIG_ARCH_EXYNOS) += exynos7870-on7xelte-bus.dtb' >> $D/Makefile
+
+      - name: Configure
+        run: |
+          cd src
+          cp ../kernel/base-6.15.config .config
+          ./scripts/kconfig/merge_config.sh -m .config ../kernel/7.1/$B.fragment
+          make olddefconfig
+          grep -E "LOCALVERSION=|NETCONSOLE=|U_SERIAL_CONSOLE=|I2C_S3C2410=|S3C2410_WATCHDOG=" .config
+
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-${{ inputs.ref }}-${{ inputs.build }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ inputs.ref }}-${{ inputs.build }}-
+            ccache-${{ inputs.ref }}-
+
+      - name: Build
+        run: |
+          cd src
+          export CCACHE_DIR=~/.cache/ccache CCACHE_MAXSIZE=3G
+          make -j$(nproc) CC="ccache aarch64-linux-gnu-gcc" Image modules dtbs 2>&1 | tail -20
+          ccache -s | tail -5
+          make -s kernelrelease | tee ../release.txt
+
+      - name: Package
+        run: |
+          cd src
+          mkdir -p ../out/mod
+          make -s modules_install INSTALL_MOD_PATH=../out/mod INSTALL_MOD_STRIP=1
+          cp arch/arm64/boot/Image ../out/
+          cp arch/arm64/boot/dts/exynos/exynos7870-on7xelte*.dtb ../out/
+          cp .config ../out/config
+          cp ../release.txt ../source.txt ../out/
+          tar -C ../out/mod -czf ../out/modules.tgz lib
+          rm -rf ../out/mod
+          cd ../out && sha256sum * > SHA256SUMS && ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ inputs.build }}
+          path: out/
+          retention-days: 14

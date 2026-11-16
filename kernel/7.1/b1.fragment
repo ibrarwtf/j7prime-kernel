@@ -1,0 +1,20 @@
+# Build 1: plain exynos7870/7.1 + logs + watchdog. Merged onto kernel/running-6.15.config.
+CONFIG_LOCALVERSION="-j7b1"
+# CONFIG_LOCALVERSION_AUTO is not set
+# logs: kernel printk over UDP (Wi-Fi) and over USB serial (ttyGS0)
+CONFIG_NETCONSOLE=y
+CONFIG_NETCONSOLE_DYNAMIC=y
+CONFIG_U_SERIAL_CONSOLE=y
+CONFIG_USB_CONFIGFS_ACM=y
+CONFIG_USB_CONFIGFS_SERIAL=y
+CONFIG_PSTORE=y
+CONFIG_PSTORE_RAM=y
+CONFIG_PSTORE_CONSOLE=y
+# the i2c controller as a module so i2c@13870000 can be brought up by hand while logging
+CONFIG_I2C_S3C2410=m
+CONFIG_I2C_CHARDEV=m
+# watchdog + kexec test loop
+CONFIG_WATCHDOG=y
+CONFIG_S3C2410_WATCHDOG=y
+CONFIG_KEXEC=y
+CONFIG_KEXEC_FILE=y

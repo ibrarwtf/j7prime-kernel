@@ -1,0 +1,14 @@
+
+/* --- j7-prime build additions (appended to exynos7870-on7xelte.dts) --- */
+/* Watchdog: vendor/Fontana/Burak node, verified on this phone 2026-11-16 (resets ~30 s after arming). */
+&{/soc@0} {
+	watchdog@10170000 {
+		compatible = "samsung,exynos7-wdt";
+		reg = <0x10170000 0x100>;
+		interrupts = <GIC_SPI 100 IRQ_TYPE_LEVEL_HIGH>;
+		clocks = <&cmu_peri CLK_GOUT_PERI_WDT_CPUCL0_PCLK>;
+		clock-names = "watchdog";
+		samsung,syscon-phandle = <&pmu_system_controller>;
+		timeout-sec = <30>;
+	};
+};
