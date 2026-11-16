@@ -1,0 +1,58 @@
+From: J7 Prime port <noreply@example.org>
+Subject: [PATCH 3/3] arm64: dts: exynos7870-on7xelte: add bit-banged IF-PMIC bus with s2mu005-lite
+
+The S2MU005 sits on the pins of i2c@13870000, but bringing up that
+controller hangs the J7 Prime. Bit-bang the bus on gpc1-0 (SDA) and
+gpc1-1 (SCL) with i2c-gpio, as already proven on this phone, and add the
+s2mu005-lite client at 0x3d. The hardware controller stays disabled.
+
+Local patch for the Galaxy J7 Prime port, not for upstream submission.
+Generated with Claude Code.
+---
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -62,6 +62,29 @@
+ 		};
+ 	};
+ 
++	/*
++	 * The S2MU005 interface PMIC sits on the pins of i2c@13870000, but
++	 * bringing up that controller hangs this phone. Bit-bang the bus
++	 * instead and keep the hardware controller disabled.
++	 */
++	i2c-ifpmic {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc1 0 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		scl-gpios = <&gpc1 1 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
++		i2c-gpio,delay-us = <5>;
++		i2c-gpio,timeout-ms = <100>;
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&ifpmic_i2c_gpio>;
++
++		pmic@3d {
++			compatible = "samsung,s2mu005-lite";
++			reg = <0x3d>;
++		};
++	};
++
+ 	memory@40000000 {
+ 		device_type = "memory";
+ 		reg = <0x0 0x40000000 0x3e400000>,
+@@ -635,6 +658,13 @@
+ 		samsung,pin-pud = <EXYNOS_PIN_PULL_DOWN>;
+ 	};
+ 
++	ifpmic_i2c_gpio: ifpmic-i2c-gpio-pins {
++		samsung,pins = "gpc1-1", "gpc1-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR1>;
++	};
++
+ 	wlan_enable: wlan-enable-pins {
+ 		samsung,pins = "gpd3-6";
+ 		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;

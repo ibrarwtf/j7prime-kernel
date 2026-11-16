@@ -1,0 +1,184 @@
+name: dev-s2mu005
+
+# Compile test of the standalone S2MU005 charger/RGB LED driver
+# (patches/7.3.4-s2mu005-lite) against linux 7.3.4 with the pmaports
+# linux-postmarketos-stable arm64 config. Uploads only the .ko and logs.
+
+on:
+  push:
+    branches: [s2mu005-dev]
+    paths:
+      - "patches/7.3.4-s2mu005-lite/**"
+      - ".github/workflows/dev-s2mu005.yml"
+  workflow_dispatch:
+    inputs:
+      full:
+        description: "also build Image + all modules, so the .ko is linked against a real Module.symvers (~25 min)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  KVER: "7.3.4"
+  PATCHES: patches/7.3.4-s2mu005-lite
+  ARCH: arm64
+  LLVM_MAJOR: "20"
+  DT_SCHEMA: power/supply/samsung,s2mu005-lite.yaml
+  DTB: exynos/exynos7870-on7xelte.dtb
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain (clang/lld, dtc, dtschema)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq bc bison flex libssl-dev libelf-dev kmod cpio zstd \
+            device-tree-compiler python3-venv wget gnupg lsb-release software-properties-common >/dev/null
+          wget -q https://apt.llvm.org/llvm.sh
+          sudo bash llvm.sh "$LLVM_MAJOR" >/dev/null 2>&1 || echo "::warning::llvm.sh $LLVM_MAJOR failed"
+          v=$LLVM_MAJOR
+          command -v clang-$v >/dev/null || v=$(ls /usr/bin/clang-[0-9]* | sed 's/.*clang-//' | sort -n | tail -1)
+          sudo apt-get install -y -qq lld-$v llvm-$v >/dev/null || true
+          echo "LLVM=-$v" >> "$GITHUB_ENV"
+          clang-$v --version | head -1
+          python3 -m venv ~/dtv
+          ~/dtv/bin/pip install -q dtschema yamllint
+          echo "$HOME/dtv/bin" >> "$GITHUB_PATH"
+          mkdir -p out
+
+      - name: Fetch linux-${{ env.KVER }} and verify the checksum
+        run: |
+          set -euo pipefail
+          major=${KVER%%.*}
+          base=https://cdn.kernel.org/pub/linux/kernel/v$major.x
+          wget -q "$base/linux-$KVER.tar.xz" "$base/sha256sums.asc"
+          grep " linux-$KVER.tar.xz\$" sha256sums.asc | sha256sum -c -
+          tar -xf "linux-$KVER.tar.xz"
+          mv "linux-$KVER" src
+          rm "linux-$KVER.tar.xz"
+
+      - name: Base config from pmaports linux-postmarketos-stable
+        run: |
+          set -euo pipefail
+          git clone -q --depth 1 --filter=blob:none --no-checkout \
+            https://gitlab.nura.eco/postmarketOS/pmaports.git pmaports
+          cd pmaports
+          cfg=$(git ls-tree -r --name-only HEAD | grep -E '/linux-postmarketos-stable/config-[^/]*aarch64$' | head -1)
+          apk=$(dirname "$cfg")/APKBUILD
+          [ -n "$cfg" ] || { echo "::error::no linux-postmarketos-stable aarch64 config in pmaports"; exit 1; }
+          git show "HEAD:$cfg" > ../base.config
+          {
+            echo "pmaports commit: $(git rev-parse HEAD)"
+            echo "config: $cfg"
+            git show "HEAD:$apk" | grep -E '^pkg(ver|rel)=' || true
+          } | tee ../out/source.txt
+          echo "linux: $KVER (cdn.kernel.org tarball, sha256 checked)" >> ../out/source.txt
+
+      - name: Apply patches
+        run: |
+          set -euo pipefail
+          cd src
+          for p in ../$PATCHES/*.patch; do
+            echo "== $p"
+            patch -p1 --no-backup-if-mismatch -N < "$p"
+          done 2>&1 | tee ../out/apply.log
+
+      - name: Configure
+        run: |
+          set -euo pipefail
+          cd src
+          cp ../base.config .config
+          scripts/config -e I2C -e POWER_SUPPLY -e NEW_LEDS -e LEDS_CLASS \
+            -m LEDS_CLASS_MULTICOLOR -m I2C_GPIO -m CHARGER_S2MU005_LITE
+          make LLVM=$LLVM -s olddefconfig
+          grep -E '^CONFIG_(CHARGER_S2MU005_LITE|LEDS_CLASS_MULTICOLOR|I2C_GPIO|REGMAP_I2C|POWER_SUPPLY)=' .config | tee ../out/config-relevant.txt
+          grep -q '^CONFIG_CHARGER_S2MU005_LITE=m' .config || { echo "::error::CHARGER_S2MU005_LITE not =m after olddefconfig"; exit 1; }
+          cp .config ../out/config
+
+      - name: checkpatch --strict
+        run: |
+          set -euo pipefail
+          cd src
+          scripts/checkpatch.pl --strict --no-signoff --ignore FILE_PATH_CHANGES \
+            ../$PATCHES/*.patch 2>&1 | tee ../out/checkpatch.log
+
+      - name: Build the module (clang, W=1)
+        run: |
+          set -euo pipefail
+          cd src
+          make LLVM=$LLVM -j"$(nproc)" -s modules_prepare
+          # Single-module build: without vmlinux the exports are unknown, so modpost
+          # only warns about them (the compile itself is what is checked here).
+          make LLVM=$LLVM W=1 KBUILD_MODPOST_WARN=1 drivers/power/supply/s2mu005-lite.ko 2>&1 | tee ../out/build-w1.log
+          grep -q 'CC \[M\]  drivers/power/supply/s2mu005-lite.o' ../out/build-w1.log
+          if grep -E 'warning:|error:' ../out/build-w1.log; then
+            echo "::error::compiler warnings in the driver build"; exit 1
+          fi
+          cp drivers/power/supply/s2mu005-lite.ko ../out/
+          modinfo drivers/power/supply/s2mu005-lite.ko | tee ../out/modinfo.txt
+
+      - name: Full build (optional, linked module)
+        if: inputs.full
+        run: |
+          set -euo pipefail
+          cd src
+          make LLVM=$LLVM -j"$(nproc)" -s Image modules 2>&1 | tail -20
+          cp drivers/power/supply/s2mu005-lite.ko ../out/
+          cp Module.symvers ../out/Module.symvers.txt
+          modinfo drivers/power/supply/s2mu005-lite.ko | tee ../out/modinfo.txt
+
+      - name: dt_binding_check
+        run: |
+          set -euo pipefail
+          cd src
+          make LLVM=$LLVM dt_binding_check DT_SCHEMA_FILES="$DT_SCHEMA" 2>&1 | tee ../out/dt_binding_check.log
+          if grep -E 'warning|error' ../out/dt_binding_check.log; then
+            echo "::error::dt_binding_check reported problems"; exit 1
+          fi
+
+      - name: DTB + dtbs_check (fails only on lines about the new nodes)
+        run: |
+          set -euo pipefail
+          cd src
+          make LLVM=$LLVM CHECK_DTBS=y "$DTB" 2>&1 | tee ../out/dtbs_check.log
+          cp "arch/arm64/boot/dts/$DTB" ../out/
+          if grep -E 'ifpmic|s2mu005-lite|pmic@3d' ../out/dtbs_check.log; then
+            echo "::error::dtbs_check complains about the new nodes"; exit 1
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          set +e
+          {
+            echo "### dev-s2mu005: linux $KVER, clang ${LLVM#-}"
+            echo '```'
+            cat out/source.txt 2>/dev/null
+            tail -n 4 out/checkpatch.log 2>/dev/null
+            grep -E 'warning:|error:' out/build-w1.log 2>/dev/null | head -40
+            ls -l out/*.ko 2>/dev/null
+            grep -cE 'warning|error' out/dtbs_check.log 2>/dev/null | sed 's/^/dtbs_check warning\/error lines (whole DTB): /'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s2mu005-lite-${{ env.KVER }}
+          path: |
+            out/*.ko
+            out/*.log
+            out/*.txt
+            out/config
+          retention-days: 3
