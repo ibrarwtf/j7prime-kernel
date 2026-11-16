@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p2 <p2@j7prime.invalid>
+Date: Mon, 16 Nov 2026 15:54:23 +0530
+Subject: [PATCH 09/10] cpuidle: psci: register the Exynos7870 deep states
+ switched off
+
+Core power-down on the Exynos7870 only works when the kernel clears the
+core's PMU configuration before PSCI CPU_SUSPEND (previous patch), and
+on at least one unit (SM-T580) the system was reported to lock up under
+load with the state enabled. Until the state is validated on a given
+board, register every state above WFI with CPUIDLE_FLAG_OFF on this
+SoC: a boot never enters it, and it is enabled per CPU at run time
+through /sys/devices/system/cpu/cpuN/cpuidle/stateM/disable, so a hang
+in the firmware path cannot turn into a boot loop.
+
+cpuidle_psci.exynos7870_deep_idle=1 on the command line registers the
+states enabled, for use once they are known to be stable.
+
+Origin: j7prime p2 series, after Burak's J701F local patch
+"cpuidle: psci: register Exynos 7870 deep states switched off"
+(github.com/Burak-GGM/j701f-linux), plus the command-line switch.
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    Origin: new in the j7prime p2 series for v7.3.4 (see the Origin line in the message).
+
+ drivers/cpuidle/cpuidle-psci.c | 21 +++++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/drivers/cpuidle/cpuidle-psci.c b/drivers/cpuidle/cpuidle-psci.c
+index b250d0d..12ffb02 100644
+--- a/drivers/cpuidle/cpuidle-psci.c
++++ b/drivers/cpuidle/cpuidle-psci.c
+@@ -46,6 +46,11 @@ static DEFINE_PER_CPU_READ_MOSTLY(struct psci_cpuidle_data, psci_cpuidle_data);
+ static DEFINE_PER_CPU(struct psci_cpuidle_domain_state, psci_domain_state);
+ static bool psci_cpuidle_use_syscore;
+ 
++static bool exynos7870_deep_idle;
++module_param(exynos7870_deep_idle, bool, 0444);
++MODULE_PARM_DESC(exynos7870_deep_idle,
++		 "Exynos7870: register the PSCI deep idle states enabled");
++
+ void psci_set_domain_state(struct generic_pm_domain *pd, unsigned int state_idx,
+ 			   u32 state)
+ {
+@@ -409,6 +414,22 @@ static int psci_idle_init_cpu(struct device *dev, int cpu)
+ 		return ret;
+ 	}
+ 
++	/*
++	 * Exynos7870: core power-down through PSCI CPU_SUSPEND depends on the
++	 * kernel preparing the PMU (exynos-pmu) and is known to lock up some
++	 * units under load. Register the deep states switched off unless
++	 * asked for on the command line; each one can still be enabled per
++	 * CPU through /sys/devices/system/cpu/cpuN/cpuidle/stateM/disable,
++	 * so a hang during the bring-up cannot become a boot loop.
++	 */
++	if (!exynos7870_deep_idle &&
++	    of_machine_is_compatible("samsung,exynos7870")) {
++		int i;
++
++		for (i = 1; i < drv->state_count; i++)
++			drv->states[i].flags |= CPUIDLE_FLAG_OFF;
++	}
++
+ 	ret = cpuidle_register(drv, NULL);
+ 	if (ret)
+ 		goto deinit;

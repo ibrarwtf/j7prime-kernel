@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p2 <p2@j7prime.invalid>
+Date: Mon, 16 Nov 2026 15:53:24 +0530
+Subject: [PATCH 03/10] dt-bindings: clock: samsung,exynos7870-cmu: add
+ CMU_CPUCL0 and CMU_CPUCL1
+
+Document the two CPU cluster clock controllers of the Exynos7870
+(CMU_CPUCL1 at 0x10800000, CMU_CPUCL0 at 0x10900000). Each takes the
+26 MHz OSCCLK and the cluster switch clock from CMU_MIF, the alternate
+parent the CPU clock parks on while the cluster PLL relocks.
+
+The clock IDs are added to the header together with the driver in the
+next patch (as in the original series).
+
+Origin: j7prime p2 series (new for 7.3.4), describing the nodes of
+Alessandro Fontana's commit b896c79c2d22 ("clk: samsung: exynos7870:
+model CMU_CPUCL0 and CMU_CPUCL1").
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    Origin: new in the j7prime p2 series for v7.3.4 (see the Origin line in the message).
+
+ .../clock/samsung,exynos7870-cmu.yaml         | 21 +++++++++++++++++++
+ 1 file changed, 21 insertions(+)
+
+diff --git a/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml b/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml
+index 3c58712..2923f3f 100644
+--- a/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml
++++ b/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml
+@@ -25,6 +25,8 @@ properties:
+   compatible:
+     enum:
+       - samsung,exynos7870-cmu-mif
++      - samsung,exynos7870-cmu-cpucl0
++      - samsung,exynos7870-cmu-cpucl1
+       - samsung,exynos7870-cmu-dispaud
+       - samsung,exynos7870-cmu-fsys
+       - samsung,exynos7870-cmu-g3d
+@@ -69,6 +71,25 @@ allOf:
+           items:
+             - const: oscclk
+ 
++  - if:
++      properties:
++        compatible:
++          contains:
++            enum:
++              - samsung,exynos7870-cmu-cpucl0
++              - samsung,exynos7870-cmu-cpucl1
++    then:
++      properties:
++        clocks:
++          items:
++            - description: External reference clock (26 MHz)
++            - description: CPU cluster switch clock (from CMU_MIF)
++
++        clock-names:
++          items:
++            - const: oscclk
++            - const: switch
++
+   - if:
+       properties:
+         compatible:

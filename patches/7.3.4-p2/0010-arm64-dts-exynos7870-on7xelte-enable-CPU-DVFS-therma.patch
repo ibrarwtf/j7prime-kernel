@@ -1,0 +1,396 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p2 <p2@j7prime.invalid>
+Date: Mon, 16 Nov 2026 15:56:22 +0530
+Subject: [PATCH 10/10] arm64: dts: exynos7870-on7xelte: enable CPU DVFS,
+ thermal and idle
+
+Wire up what the SoC patches before this one provide:
+
+- cpu-supply = BUCK1 (VDD_CPU, shared by both clusters) and one
+  operating-points-v2 table per cluster for cpufreq-dt. The tables list
+  the ECT levels with a voltage in the vendor ASV table, at ASV table 5
+  group 5 + 25 mV (Fontana's SM-T580 values), which is at or above
+  Burak's measured SM-J701F vendor voltages + 12.5 mV at every level.
+  The ceiling is 1248 MHz for the bring-up; 1352/1482/1586 MHz (vendor
+  maximum) are present with status "disabled". The OPP voltage ranges
+  reach up to the regulator maximum so the requests of the two clusters
+  aggregate on the shared rail.
+- A fixed 100 us settling time after every BUCK1 rise: the s2mps11
+  driver does not program the BUCK1 ramp rate on the S2MPU05, so the
+  12 mV/us of the DT is not guaranteed by the hardware.
+- The SoC thermal zone on the TMU, with the TMU node enabled: passive
+  trips at 80 C (both clusters to 902.2 MHz) and 90 C (546 MHz), hot at
+  100 C, critical at 110 C (vendor hardware trip: 115 C).
+- The PSCI core power-down idle state (vendor CPU_SLEEP parameter
+  0x10000), registered switched off by cpuidle-psci on this SoC.
+
+Origin: j7prime p2 series. OPP tables and cpu-supply wiring follow
+Alessandro Fontana's exynos7870-gtaxlwifi.dts (gtaxlwifi/7.3,
+d1979ff14a1d); idle state after Burak's exynos7870-j7velte-cpuidle.dts;
+trips chosen for this phone.
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    Origin: new in the j7prime p2 series for v7.3.4 (see the Origin line in the message).
+
+ .../boot/dts/exynos/exynos7870-on7xelte.dts   | 311 ++++++++++++++++++
+ 1 file changed, 311 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+index 29be476..0080f7b 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -30,6 +30,28 @@
+ 		stdout-path = &serial2;
+ 	};
+ 
++	cpus {
++		idle-states {
++			entry-method = "psci";
++
++			/*
++			 * Core power-down through PSCI CPU_SUSPEND, with the
++			 * parameter of the vendor DT (CPU_SLEEP). Latencies are
++			 * deliberately longer than the vendor's 35/90/750 us.
++			 * The cpuidle-psci driver registers this state switched
++			 * off on Exynos7870; it is enabled per CPU at run time.
++			 */
++			cpu_sleep: cpu-sleep {
++				compatible = "arm,idle-state";
++				arm,psci-suspend-param = <0x0010000>;
++				local-timer-stop;
++				entry-latency-us = <100>;
++				exit-latency-us = <500>;
++				min-residency-us = <2000>;
++			};
++		};
++	};
++
+ 	gpio-keys {
+ 		compatible = "gpio-keys";
+ 		label = "GPIO Keys";
+@@ -68,6 +90,177 @@
+ 		      <0x0 0x80000000 0x80000000>;
+ 	};
+ 
++	/*
++	 * CPU operating points. Frequencies are the exact PLL rates of the
++	 * clk-cpu configuration table (anything else is rejected).
++	 *
++	 * Voltages: vendor ASV table 5 (group 5) plus 25 mV, as used for the
++	 * SM-T580 in Alessandro Fontana's tree. At every level they are at
++	 * or above the BUCK1 values measured under the vendor kernel on an
++	 * SM-J701F plus 12.5 mV (Burak), so no level is undervolted against
++	 * either reference. The ASV group of this chip is not known: compare
++	 * the boot voltage of BUCK1 (bootloader level 902.2 MHz) with the
++	 * 902.2 MHz entry before enabling cpufreq.
++	 *
++	 * The maximum is capped at 1248 MHz for the bring-up; 1352, 1482 and
++	 * 1586 MHz (the vendor maximum) are present but disabled. 1690 MHz
++	 * and above have no voltage in the vendor ASV table and are not
++	 * listed.
++	 *
++	 * Both clusters share BUCK1: the wide maximum in opp-microvolt lets
++	 * the regulator core keep the rail at the highest of the two
++	 * requests.
++	 */
++	cpucl0_opp_table: opp-table-cpucl0 {
++		compatible = "operating-points-v2";
++		opp-shared;
++
++		opp-546000000 {
++			opp-hz = /bits/ 64 <546000000>;
++			opp-microvolt = <675000 675000 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-676000000 {
++			opp-hz = /bits/ 64 <676000000>;
++			opp-microvolt = <718750 718750 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-756600000 {
++			opp-hz = /bits/ 64 <756600000>;
++			opp-microvolt = <743750 743750 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-838500000 {
++			opp-hz = /bits/ 64 <838500000>;
++			opp-microvolt = <762500 762500 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-902200000 {
++			opp-hz = /bits/ 64 <902200000>;
++			opp-microvolt = <787500 787500 1300000>;
++			clock-latency-ns = <140000>;
++			opp-suspend;
++		};
++
++		opp-1014000000 {
++			opp-hz = /bits/ 64 <1014000000>;
++			opp-microvolt = <831250 831250 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-1144000000 {
++			opp-hz = /bits/ 64 <1144000000>;
++			opp-microvolt = <881250 881250 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-1248000000 {
++			opp-hz = /bits/ 64 <1248000000>;
++			opp-microvolt = <925000 925000 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-1352000000 {
++			opp-hz = /bits/ 64 <1352000000>;
++			opp-microvolt = <968750 968750 1300000>;
++			clock-latency-ns = <140000>;
++			status = "disabled";
++		};
++
++		opp-1482000000 {
++			opp-hz = /bits/ 64 <1482000000>;
++			opp-microvolt = <1018750 1018750 1300000>;
++			clock-latency-ns = <140000>;
++			status = "disabled";
++		};
++
++		opp-1586000000 {
++			opp-hz = /bits/ 64 <1586000000>;
++			opp-microvolt = <1068750 1068750 1300000>;
++			clock-latency-ns = <140000>;
++			status = "disabled";
++		};
++	};
++
++	cpucl1_opp_table: opp-table-cpucl1 {
++		compatible = "operating-points-v2";
++		opp-shared;
++
++		opp-546000000 {
++			opp-hz = /bits/ 64 <546000000>;
++			opp-microvolt = <675000 675000 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-676000000 {
++			opp-hz = /bits/ 64 <676000000>;
++			opp-microvolt = <718750 718750 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-756600000 {
++			opp-hz = /bits/ 64 <756600000>;
++			opp-microvolt = <743750 743750 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-838500000 {
++			opp-hz = /bits/ 64 <838500000>;
++			opp-microvolt = <762500 762500 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-902200000 {
++			opp-hz = /bits/ 64 <902200000>;
++			opp-microvolt = <787500 787500 1300000>;
++			clock-latency-ns = <140000>;
++			opp-suspend;
++		};
++
++		opp-1014000000 {
++			opp-hz = /bits/ 64 <1014000000>;
++			opp-microvolt = <831250 831250 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-1144000000 {
++			opp-hz = /bits/ 64 <1144000000>;
++			opp-microvolt = <881250 881250 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-1248000000 {
++			opp-hz = /bits/ 64 <1248000000>;
++			opp-microvolt = <925000 925000 1300000>;
++			clock-latency-ns = <140000>;
++		};
++
++		opp-1352000000 {
++			opp-hz = /bits/ 64 <1352000000>;
++			opp-microvolt = <968750 968750 1300000>;
++			clock-latency-ns = <140000>;
++			status = "disabled";
++		};
++
++		opp-1482000000 {
++			opp-hz = /bits/ 64 <1482000000>;
++			opp-microvolt = <1018750 1018750 1300000>;
++			clock-latency-ns = <140000>;
++			status = "disabled";
++		};
++
++		opp-1586000000 {
++			opp-hz = /bits/ 64 <1586000000>;
++			opp-microvolt = <1068750 1068750 1300000>;
++			clock-latency-ns = <140000>;
++			status = "disabled";
++		};
++	};
++
+ 	pwrseq_mmc1: pwrseq-mmc1 {
+ 		compatible = "mmc-pwrseq-simple";
+ 		reset-gpios = <&gpd3 6 GPIO_ACTIVE_LOW>;
+@@ -102,6 +295,65 @@
+ 		};
+ 	};
+ 
++	/*
++	 * One sensor for the whole SoC. Trips are below the vendor ones
++	 * (ECT AP_THERMAL: 76..101 C bands, hardware trip at 115 C), because
++	 * this phone runs as an always-on server in a closed case:
++	 *   80 C: both clusters to 902.2 MHz (the bootloader level),
++	 *   90 C: both clusters to 546 MHz (lowest enabled level),
++	 *  100 C: "hot" notification only,
++	 *  110 C: critical, orderly power-off.
++	 * CPU cooling states index the enabled OPPs from the top:
++	 * 0 = 1248, 3 = 902.2, 7 = 546 MHz.
++	 */
++	thermal-zones {
++		soc-thermal {
++			polling-delay-passive = <250>;
++			polling-delay = <2000>;
++			thermal-sensors = <&tmu>;
++
++			trips {
++				soc_alert0: soc-alert0 {
++					temperature = <80000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				soc_alert1: soc-alert1 {
++					temperature = <90000>;
++					hysteresis = <5000>;
++					type = "passive";
++				};
++
++				soc-hot {
++					temperature = <100000>;
++					hysteresis = <5000>;
++					type = "hot";
++				};
++
++				soc-crit {
++					temperature = <110000>;
++					hysteresis = <0>;
++					type = "critical";
++				};
++			};
++
++			cooling-maps {
++				map0 {
++					trip = <&soc_alert0>;
++					cooling-device = <&cpu0 3 3>,
++							 <&cpu4 3 3>;
++				};
++
++				map1 {
++					trip = <&soc_alert1>;
++					cooling-device = <&cpu0 7 7>,
++							 <&cpu4 7 7>;
++				};
++			};
++		};
++	};
++
+ 	vibrator {
+ 		compatible = "regulator-haptic";
+ 		haptic-supply = <&vdd_ldo32>;
+@@ -110,6 +362,54 @@
+ 	};
+ };
+ 
++&cpu0 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl0_opp_table>;
++};
++
++&cpu1 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl0_opp_table>;
++};
++
++&cpu2 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl0_opp_table>;
++};
++
++&cpu3 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl0_opp_table>;
++};
++
++&cpu4 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl1_opp_table>;
++};
++
++&cpu5 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl1_opp_table>;
++};
++
++&cpu6 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl1_opp_table>;
++};
++
++&cpu7 {
++	cpu-idle-states = <&cpu_sleep>;
++	cpu-supply = <&vdd_buck1>;
++	operating-points-v2 = <&cpucl1_opp_table>;
++};
++
+ &decon {
+ 	memory-region = <&cont_splash_mem>;
+ 
+@@ -177,6 +477,13 @@
+ 				regulator-min-microvolt = <500000>;
+ 				regulator-max-microvolt = <1300000>;
+ 				regulator-ramp-delay = <12000>;
++				/*
++				 * VDD_CPU of both clusters. The driver does not
++				 * program the BUCK1 ramp rate on this PMIC, so
++				 * wait a fixed, generous time after each rise
++				 * before the CPU clock goes up.
++				 */
++				regulator-settling-time-up-us = <100>;
+ 				regulator-boot-on;
+ 				regulator-always-on;
+ 			};
+@@ -676,6 +983,10 @@
+ 	status = "okay";
+ };
+ 
++&tmu {
++	status = "okay";
++};
++
+ &usbdrd {
+ 	vdd33-supply = <&vdd_ldo8>;
+ 
