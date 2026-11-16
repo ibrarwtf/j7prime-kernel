@@ -352,7 +352,7 @@ jobs:
           set -euo pipefail
           mkdir -p /home/runner/.cache/ccache-stable out
           PKGS="bash bison clang clang-libclang diffutils elfutils-dev findutils flex grep kmod linux-headers lld llvm
-            openssl-dev pahole perl python3 rust rust-bindgen rust-src rustfmt sed zstd xz tar curl patch ccache coreutils make gzip"
+            openssl openssl-dev pahole perl python3 rust rust-bindgen rust-src rustfmt sed zstd xz tar curl patch ccache coreutils make gzip"
           docker run --rm -v "$PWD:/w" -v /home/runner/.cache/ccache-stable:/ccache -w /w \
             -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=6G -e BUILD -e BUILD_DIR -e OUT=/w/out -e PKGS="$PKGS" \
             alpine:edge sh -euc 'apk add -q $PKGS && sh scripts/stable-build.sh'
