@@ -1,0 +1,1059 @@
+From: J7 Prime port <noreply@example.org>
+Subject: [PATCH 2/3] power: supply: add standalone S2MU005 charger and RGB LED driver
+
+Add a minimal I2C client driver for the charger and RGB notification LED
+of the Samsung S2MU005, for boards where the S2MU005 MFD cannot run. It
+requests no interrupt, never touches the MUIC, flash or fuel gauge
+registers, only reads at probe (the ID register must read 0x13) and
+writes nothing until user space asks or the auto_policy parameter is set.
+
+Charger: a power supply with online, status, input_current_limit and
+constant_charge_current (read/write, clamped), constant_charge_voltage
+(read only), charge_behaviour (auto / inhibit-charge) and
+charge_control_{start,end}_threshold implemented by a poll that reads
+the capacity of the fuel gauge power supply. The poll also restores the
+limits that the chip drops to 500/450 mA after an unplug.
+
+All writes go through one function that refuses operation mode 0 and the
+OTG modes, refuses "charging off" (mode 1) while VBUS is absent, refuses
+currents outside the clamp ranges and any register outside the charger
+mode/current fields and the RGB LED block.
+
+LED: a multicolor (RGB) LED class device with hardware blink and
+hardware pattern support on the chip's ramp/stay timers.
+
+Local patch for the Galaxy J7 Prime port, not for upstream submission.
+Generated with Claude Code.
+---
+diff --git a/drivers/power/supply/Kconfig b/drivers/power/supply/Kconfig
+--- a/drivers/power/supply/Kconfig
++++ b/drivers/power/supply/Kconfig
+@@ -873,6 +873,21 @@
+ 	  devices provide USB power supply information and also required
+ 	  for USB OTG role switching.
+ 
++config CHARGER_S2MU005_LITE
++	tristate "Samsung S2MU005 charger and RGB LED, standalone I2C client"
++	depends on I2C
++	depends on LEDS_CLASS_MULTICOLOR
++	select REGMAP_I2C
++	help
++	  Minimal driver for the charger and RGB notification LED blocks
++	  of the Samsung S2MU005 interface PMIC, for boards where the full
++	  S2MU005 MFD (MUIC, interrupt line, flash) cannot be used. It is a
++	  plain I2C client without an interrupt: it never touches the MUIC,
++	  only reads at probe, and writes the charger only on request.
++
++	  To compile this driver as a module, choose M here: the module
++	  will be called s2mu005-lite.
++
+ config CHARGER_SGM41542
+ 	tristate "SGM41542 charger driver"
+ 	depends on I2C
+diff --git a/drivers/power/supply/Makefile b/drivers/power/supply/Makefile
+--- a/drivers/power/supply/Makefile
++++ b/drivers/power/supply/Makefile
+@@ -109,6 +109,7 @@
+ obj-$(CONFIG_CHARGER_BQ256XX)	+= bq256xx_charger.o
+ obj-$(CONFIG_CHARGER_RK817)	+= rk817_charger.o
+ obj-$(CONFIG_CHARGER_S2M)	+= s2m-charger.o
++obj-$(CONFIG_CHARGER_S2MU005_LITE)	+= s2mu005-lite.o
+ obj-$(CONFIG_CHARGER_SGM41542)	+= sgm41542_charger.o
+ obj-$(CONFIG_CHARGER_SMB347)	+= smb347-charger.o
+ obj-$(CONFIG_CHARGER_TPS65090)	+= tps65090-charger.o
+diff --git a/drivers/power/supply/s2mu005-lite.c b/drivers/power/supply/s2mu005-lite.c
+new file mode 100644
+--- /dev/null
++++ b/drivers/power/supply/s2mu005-lite.c
+@@ -0,0 +1,991 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Samsung S2MU005 charger and RGB LED, standalone I2C client driver
++ *
++ * A minimal driver for boards on which the full S2MU005 MFD (charger, MUIC,
++ * flash, fuel gauge and an interrupt line) cannot be used. It drives only the
++ * charger and RGB LED blocks through a plain I2C client without an interrupt:
++ *
++ *  - probe only reads, and refuses a chip whose ID register is not 0x13;
++ *  - nothing is written until user space writes a property or the LED, or the
++ *    auto_policy module parameter asks for the automatic policy;
++ *  - the MUIC, flash, interrupt and fuel gauge registers are never accessed;
++ *  - every register write goes through s2mu005l_write(), which enforces the
++ *    charger safety rules listed there.
++ *
++ * Plug and unplug are noticed by polling. After an unplug the chip falls back
++ * to a 500 mA input limit and a 450 mA charge current and keeps them after the
++ * next plug-in, so the poll restores the limits last asked for. The poll also
++ * implements charge_control_{start,end}_threshold with the capacity of the
++ * fuel gauge power supply named by the fg_name module parameter.
++ *
++ * Register layout from include/linux/mfd/samsung/s2mu005.h. The LED timing
++ * tables and the pattern mapping follow drivers/leds/rgb/leds-s2m-rgb.c.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/cleanup.h>
++#include <linux/devm-helpers.h>
++#include <linux/i2c.h>
++#include <linux/led-class-multicolor.h>
++#include <linux/math.h>
++#include <linux/mfd/samsung/s2mu005.h>
++#include <linux/minmax.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/mutex.h>
++#include <linux/power_supply.h>
++#include <linux/regmap.h>
++#include <linux/workqueue.h>
++
++#define S2MU005L_ID			0x13
++
++/* CHGR_CTRL0 operation modes this driver may write */
++#define S2MU005L_MODE_BUCK		1	/* input on, charging off */
++#define S2MU005L_MODE_CHARGE		2	/* input on, charging on */
++
++/* Input current limit: CHGR_CTRL2[5:0] = (mA - 100) / 50 */
++#define S2MU005L_INPUT_MIN_UA		100000
++#define S2MU005L_INPUT_MAX_UA		1550000
++#define S2MU005L_INPUT_STEP_UA		50000
++#define S2MU005L_INPUT_MAX_CODE		29
++
++/* Fast charge current: CHGR_CTRL7[5:0] = (mA - 100) / 50 + 1 */
++#define S2MU005L_CHARGE_MIN_UA		100000
++#define S2MU005L_CHARGE_MAX_UA		1850000
++#define S2MU005L_CHARGE_STEP_UA		50000
++#define S2MU005L_CHARGE_MIN_CODE	1
++#define S2MU005L_CHARGE_MAX_CODE	36
++
++/* Float voltage: CHGR_CTRL8[6:1] = (mV - 3900) / 10, never written */
++#define S2MU005L_FLOAT_BASE_UV		3900000
++#define S2MU005L_FLOAT_STEP_UV		10000
++
++#define S2MU005L_POLL_MIN_MS		1000
++#define S2MU005L_NUM_COLORS		3
++
++static bool auto_policy;
++module_param(auto_policy, bool, 0444);
++MODULE_PARM_DESC(auto_policy,
++		 "Apply the limits and charge window below without being asked (default: off)");
++
++static unsigned int input_limit_ua = S2MU005L_INPUT_MAX_UA;
++module_param(input_limit_ua, uint, 0444);
++MODULE_PARM_DESC(input_limit_ua, "auto_policy: input current limit to keep, uA");
++
++static unsigned int charge_current_ua = S2MU005L_CHARGE_MAX_UA;
++module_param(charge_current_ua, uint, 0444);
++MODULE_PARM_DESC(charge_current_ua, "auto_policy: charge current to keep, uA");
++
++static unsigned int start_threshold = 75;
++module_param(start_threshold, uint, 0444);
++MODULE_PARM_DESC(start_threshold, "auto_policy: start charging at or below this capacity, %");
++
++static unsigned int end_threshold = 80;
++module_param(end_threshold, uint, 0444);
++MODULE_PARM_DESC(end_threshold, "auto_policy: stop charging at or above this capacity, % (100: off)");
++
++static unsigned int poll_ms = 5000;
++module_param(poll_ms, uint, 0444);
++MODULE_PARM_DESC(poll_ms, "Poll period, ms (minimum 1000)");
++
++static char *fg_name = "s2mu005-fg";
++module_param(fg_name, charp, 0444);
++MODULE_PARM_DESC(fg_name, "Power supply that reports the battery capacity");
++
++struct s2mu005l {
++	struct device *dev;
++	struct regmap *regmap;
++	struct power_supply *psy;
++	struct led_classdev_mc mc;
++	struct mc_subled subled[S2MU005L_NUM_COLORS];
++	struct delayed_work poll;
++	unsigned long poll_jiffies;
++	/* Serialises all register writes and the state below. */
++	struct mutex lock;
++
++	/* Charger: limits to restore after a replug, 0 = leave alone. */
++	unsigned int input_ua;
++	unsigned int charge_ua;
++	/* Charge window in percent; end_pct == 100 switches it off. */
++	unsigned int start_pct;
++	unsigned int end_pct;
++	bool user_inhibit;	/* charge_behaviour = inhibit-charge */
++	bool window_hold;	/* the window currently holds charging off */
++	bool mode_owned;	/* this driver controls the CTRL0 mode */
++	bool warned_mode;
++	unsigned int last_status0;
++	unsigned int last_mode;
++
++	/* LED pattern, indices into the timing tables. */
++	u8 ramp_up;
++	u8 ramp_dn;
++	u8 stay_hi;
++	u8 stay_lo;
++};
++
++/*
++ * s2mu005l_write - the only function that writes to the chip
++ *
++ * Rules, checked on every call:
++ *  - CHGR_CTRL0: only the operation mode field, and only mode 2 (charge) or
++ *    mode 1 (input on, charging off). Mode 1 only while STATUS0 reports VBUS,
++ *    read again here: mode 1 written on battery reset the phone at the next
++ *    plug-in. Mode 0 (input off) and the OTG modes are never written.
++ *  - CHGR_CTRL2 and CHGR_CTRL7: only the current field, inside the clamp range.
++ *  - The RGB LED registers.
++ *  - Nothing else: not the float voltage, MUIC, flash or interrupt registers.
++ */
++static int s2mu005l_write(struct s2mu005l *chip, unsigned int reg,
++			  unsigned int mask, unsigned int val)
++{
++	unsigned int status0, code;
++	int ret;
++
++	lockdep_assert_held(&chip->lock);
++
++	switch (reg) {
++	case S2MU005_REG_CHGR_CTRL0:
++		if (mask != S2MU005_CHGR_OP_MODE)
++			goto refuse;
++		switch (FIELD_GET(S2MU005_CHGR_OP_MODE, val)) {
++		case S2MU005L_MODE_CHARGE:
++			break;
++		case S2MU005L_MODE_BUCK:
++			ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
++			if (ret)
++				return ret;
++			if (!(status0 & S2MU005_CHGR_VBUS)) {
++				dev_warn(chip->dev, "refusing to stop charging without VBUS\n");
++				return -EPERM;
++			}
++			break;
++		default:
++			goto refuse;
++		}
++		break;
++	case S2MU005_REG_CHGR_CTRL2:
++		code = FIELD_GET(S2MU005_CHGR_IN_CURR_LIM, val);
++		if (mask != S2MU005_CHGR_IN_CURR_LIM || code > S2MU005L_INPUT_MAX_CODE)
++			goto refuse;
++		break;
++	case S2MU005_REG_CHGR_CTRL7:
++		code = FIELD_GET(S2MU005_CHGR_FAST_CHG_CURR, val);
++		if (mask != S2MU005_CHGR_FAST_CHG_CURR ||
++		    code < S2MU005L_CHARGE_MIN_CODE || code > S2MU005L_CHARGE_MAX_CODE)
++			goto refuse;
++		break;
++	case S2MU005_REG_RGB_EN ... S2MU005_REG_RGB_CH2_STAY:
++		break;
++	default:
++		goto refuse;
++	}
++
++	return regmap_write_bits(chip->regmap, reg, mask, val);
++
++refuse:
++	dev_err(chip->dev, "refusing to write %#x (mask %#x) to register %#x\n",
++		val, mask, reg);
++	return -EPERM;
++}
++
++static const struct regmap_range s2mu005l_rd_ranges[] = {
++	regmap_reg_range(S2MU005_REG_CHGR_STATUS0, S2MU005_REG_CHGR_CTRL8),
++	regmap_reg_range(S2MU005_REG_RGB_EN, S2MU005_REG_RGB_CH2_STAY),
++	regmap_reg_range(S2MU005_REG_ID, S2MU005_REG_ID),
++};
++
++static const struct regmap_access_table s2mu005l_rd_table = {
++	.yes_ranges = s2mu005l_rd_ranges,
++	.n_yes_ranges = ARRAY_SIZE(s2mu005l_rd_ranges),
++};
++
++static const struct regmap_range s2mu005l_wr_ranges[] = {
++	regmap_reg_range(S2MU005_REG_CHGR_CTRL0, S2MU005_REG_CHGR_CTRL0),
++	regmap_reg_range(S2MU005_REG_CHGR_CTRL2, S2MU005_REG_CHGR_CTRL2),
++	regmap_reg_range(S2MU005_REG_CHGR_CTRL7, S2MU005_REG_CHGR_CTRL7),
++	regmap_reg_range(S2MU005_REG_RGB_EN, S2MU005_REG_RGB_CH2_STAY),
++};
++
++static const struct regmap_access_table s2mu005l_wr_table = {
++	.yes_ranges = s2mu005l_wr_ranges,
++	.n_yes_ranges = ARRAY_SIZE(s2mu005l_wr_ranges),
++};
++
++static const struct regmap_config s2mu005l_regmap_config = {
++	.reg_bits = 8,
++	.val_bits = 8,
++	.max_register = S2MU005_REG_ID,
++	.rd_table = &s2mu005l_rd_table,
++	.wr_table = &s2mu005l_wr_table,
++	.cache_type = REGCACHE_NONE,
++};
++
++static unsigned int s2mu005l_input_ua(unsigned int reg)
++{
++	return FIELD_GET(S2MU005_CHGR_IN_CURR_LIM, reg) * S2MU005L_INPUT_STEP_UA +
++	       S2MU005L_INPUT_MIN_UA;
++}
++
++static unsigned int s2mu005l_charge_ua(unsigned int reg)
++{
++	unsigned int code = FIELD_GET(S2MU005_CHGR_FAST_CHG_CURR, reg);
++
++	if (!code)
++		return 0;
++	return (code - 1) * S2MU005L_CHARGE_STEP_UA + S2MU005L_CHARGE_MIN_UA;
++}
++
++static unsigned int s2mu005l_float_uv(unsigned int reg)
++{
++	return FIELD_GET(S2MU005_CHGR_VF_VBAT, reg) * S2MU005L_FLOAT_STEP_UV +
++	       S2MU005L_FLOAT_BASE_UV;
++}
++
++static int s2mu005l_set_input(struct s2mu005l *chip, unsigned int ua)
++{
++	unsigned int code;
++
++	ua = clamp_t(unsigned int, ua, S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_MAX_UA);
++	code = (ua - S2MU005L_INPUT_MIN_UA) / S2MU005L_INPUT_STEP_UA;
++	return s2mu005l_write(chip, S2MU005_REG_CHGR_CTRL2, S2MU005_CHGR_IN_CURR_LIM,
++			      FIELD_PREP(S2MU005_CHGR_IN_CURR_LIM, code));
++}
++
++static int s2mu005l_set_charge(struct s2mu005l *chip, unsigned int ua)
++{
++	unsigned int code;
++
++	ua = clamp_t(unsigned int, ua, S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_MAX_UA);
++	code = (ua - S2MU005L_CHARGE_MIN_UA) / S2MU005L_CHARGE_STEP_UA + 1;
++	return s2mu005l_write(chip, S2MU005_REG_CHGR_CTRL7, S2MU005_CHGR_FAST_CHG_CURR,
++			      FIELD_PREP(S2MU005_CHGR_FAST_CHG_CURR, code));
++}
++
++static int s2mu005l_set_mode(struct s2mu005l *chip, unsigned int mode)
++{
++	int ret;
++
++	ret = s2mu005l_write(chip, S2MU005_REG_CHGR_CTRL0, S2MU005_CHGR_OP_MODE,
++			     FIELD_PREP(S2MU005_CHGR_OP_MODE, mode));
++	if (!ret)
++		dev_info(chip->dev, "charging %s\n",
++			 mode == S2MU005L_MODE_CHARGE ? "on" : "off");
++	return ret;
++}
++
++/* Bring the CTRL0 mode in line with the requested state. Lock held. */
++static int s2mu005l_update_mode(struct s2mu005l *chip, unsigned int status0,
++				unsigned int ctrl0)
++{
++	unsigned int mode = FIELD_GET(S2MU005_CHGR_OP_MODE, ctrl0);
++	unsigned int want;
++
++	if (!(status0 & S2MU005_CHGR_VBUS)) {
++		/*
++		 * On unplug the chip returns to mode 2 by itself. Mode 1 left on
++		 * battery reset the phone at the next plug-in, so undo it.
++		 */
++		if (mode != S2MU005L_MODE_BUCK)
++			return 0;
++		if (!chip->mode_owned) {
++			if (!chip->warned_mode)
++				dev_warn(chip->dev, "charging off without VBUS, not owned: left alone\n");
++			chip->warned_mode = true;
++			return 0;
++		}
++		dev_warn(chip->dev, "charging off without VBUS, switching back on\n");
++		return s2mu005l_set_mode(chip, S2MU005L_MODE_CHARGE);
++	}
++
++	if (!chip->mode_owned)
++		return 0;
++
++	want = chip->user_inhibit || chip->window_hold ?
++	       S2MU005L_MODE_BUCK : S2MU005L_MODE_CHARGE;
++	if (mode == want)
++		return 0;
++	if (mode != S2MU005L_MODE_BUCK && mode != S2MU005L_MODE_CHARGE) {
++		if (!chip->warned_mode)
++			dev_warn(chip->dev, "unexpected mode %u: left alone\n", mode);
++		chip->warned_mode = true;
++		return 0;
++	}
++	return s2mu005l_set_mode(chip, want);
++}
++
++/* Restore the limits the chip dropped after an unplug. Lock held, VBUS present. */
++static void s2mu005l_restore_limits(struct s2mu005l *chip)
++{
++	unsigned int reg;
++
++	if (chip->input_ua &&
++	    !regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL2, &reg) &&
++	    s2mu005l_input_ua(reg) != chip->input_ua) {
++		dev_info(chip->dev, "input limit %u -> %u uA\n",
++			 s2mu005l_input_ua(reg), chip->input_ua);
++		s2mu005l_set_input(chip, chip->input_ua);
++	}
++
++	if (chip->charge_ua &&
++	    !regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL7, &reg) &&
++	    s2mu005l_charge_ua(reg) != chip->charge_ua) {
++		dev_info(chip->dev, "charge current %u -> %u uA\n",
++			 s2mu005l_charge_ua(reg), chip->charge_ua);
++		s2mu005l_set_charge(chip, chip->charge_ua);
++	}
++}
++
++static int s2mu005l_fg_capacity(struct s2mu005l *chip)
++{
++	union power_supply_propval val;
++	struct power_supply *fg;
++	int ret;
++
++	fg = power_supply_get_by_name(fg_name);
++	if (!fg)
++		fg = power_supply_get_by_name("s2mu005-fuel-gauge");
++	if (!fg) {
++		dev_warn_once(chip->dev, "no fuel gauge '%s': charge window idle\n", fg_name);
++		return -ENODEV;
++	}
++
++	ret = power_supply_get_property(fg, POWER_SUPPLY_PROP_CAPACITY, &val);
++	power_supply_put(fg);
++	if (ret)
++		return ret;
++
++	return clamp(val.intval, 0, 100);
++}
++
++/* One poll step. Returns true when user space should be told. */
++static bool s2mu005l_poll_once(struct s2mu005l *chip, int capacity)
++{
++	unsigned int status0, ctrl0, mode;
++	bool changed;
++
++	guard(mutex)(&chip->lock);
++
++	if (chip->end_pct >= 100)
++		chip->window_hold = false;
++	else if (capacity >= 0 && capacity >= chip->end_pct)
++		chip->window_hold = true;
++	else if (capacity >= 0 && capacity <= chip->start_pct)
++		chip->window_hold = false;
++
++	if (regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0) ||
++	    regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL0, &ctrl0))
++		return false;
++
++	if (status0 & S2MU005_CHGR_VBUS)
++		s2mu005l_restore_limits(chip);
++	s2mu005l_update_mode(chip, status0, ctrl0);
++
++	mode = FIELD_GET(S2MU005_CHGR_OP_MODE, ctrl0);
++	changed = status0 != chip->last_status0 || mode != chip->last_mode;
++	chip->last_status0 = status0;
++	chip->last_mode = mode;
++
++	return changed;
++}
++
++static void s2mu005l_poll(struct work_struct *work)
++{
++	struct s2mu005l *chip = container_of(to_delayed_work(work), struct s2mu005l, poll);
++	int capacity = -ENODATA;
++
++	if (READ_ONCE(chip->end_pct) < 100)
++		capacity = s2mu005l_fg_capacity(chip);
++
++	if (s2mu005l_poll_once(chip, capacity))
++		power_supply_changed(chip->psy);
++
++	queue_delayed_work(system_freezable_wq, &chip->poll, chip->poll_jiffies);
++}
++
++static void s2mu005l_kick(struct s2mu005l *chip)
++{
++	mod_delayed_work(system_freezable_wq, &chip->poll, 0);
++}
++
++static int s2mu005l_get_status(struct s2mu005l *chip, int *status)
++{
++	unsigned int status0, ctrl0;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
++	if (ret)
++		return ret;
++	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL0, &ctrl0);
++	if (ret)
++		return ret;
++
++	if (!(status0 & S2MU005_CHGR_VBUS)) {
++		*status = POWER_SUPPLY_STATUS_DISCHARGING;
++		return 0;
++	}
++	if (FIELD_GET(S2MU005_CHGR_OP_MODE, ctrl0) != S2MU005L_MODE_CHARGE) {
++		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++		return 0;
++	}
++
++	switch (FIELD_GET(S2MU005_CHGR_STAT, status0)) {
++	case S2MU005_CHGR_STAT_PRE_CHG:
++	case S2MU005_CHGR_STAT_COOL_CHG:
++	case S2MU005_CHGR_STAT_CC:
++	case S2MU005_CHGR_STAT_CV:
++		*status = POWER_SUPPLY_STATUS_CHARGING;
++		break;
++	case S2MU005_CHGR_STAT_DONE_FLAG:
++	case S2MU005_CHGR_STAT_TOPOFF:
++	case S2MU005_CHGR_STAT_DONE:
++		*status = POWER_SUPPLY_STATUS_FULL;
++		break;
++	default:
++		*status = POWER_SUPPLY_STATUS_NOT_CHARGING;
++		break;
++	}
++	return 0;
++}
++
++static int s2mu005l_get_property(struct power_supply *psy,
++				 enum power_supply_property psp,
++				 union power_supply_propval *val)
++{
++	struct s2mu005l *chip = power_supply_get_drvdata(psy);
++	unsigned int reg;
++	int ret;
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_ONLINE:
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &reg);
++		if (ret)
++			return ret;
++		val->intval = !!(reg & S2MU005_CHGR_VBUS);
++		return 0;
++	case POWER_SUPPLY_PROP_STATUS:
++		return s2mu005l_get_status(chip, &val->intval);
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL2, &reg);
++		if (ret)
++			return ret;
++		val->intval = s2mu005l_input_ua(reg);
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL7, &reg);
++		if (ret)
++			return ret;
++		val->intval = s2mu005l_charge_ua(reg);
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX:
++		val->intval = S2MU005L_CHARGE_MAX_UA;
++		return 0;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL8, &reg);
++		if (ret)
++			return ret;
++		val->intval = s2mu005l_float_uv(reg);
++		return 0;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		val->intval = READ_ONCE(chip->user_inhibit) ?
++			      POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
++			      POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
++		return 0;
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
++		val->intval = READ_ONCE(chip->start_pct);
++		return 0;
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		val->intval = READ_ONCE(chip->end_pct);
++		return 0;
++	default:
++		return -EINVAL;
++	}
++}
++
++static int s2mu005l_set_behaviour(struct s2mu005l *chip, int behaviour)
++{
++	unsigned int status0, ctrl0;
++	int ret;
++
++	switch (behaviour) {
++	case POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO:
++		WRITE_ONCE(chip->user_inhibit, false);
++		break;
++	case POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:
++		WRITE_ONCE(chip->user_inhibit, true);
++		break;
++	default:
++		return -EINVAL;
++	}
++	chip->mode_owned = true;
++
++	/* Without VBUS this only records the request; the poll applies it. */
++	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
++	if (ret)
++		return ret;
++	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL0, &ctrl0);
++	if (ret)
++		return ret;
++	return s2mu005l_update_mode(chip, status0, ctrl0);
++}
++
++static int s2mu005l_set_property(struct power_supply *psy,
++				 enum power_supply_property psp,
++				 const union power_supply_propval *val)
++{
++	struct s2mu005l *chip = power_supply_get_drvdata(psy);
++	unsigned int ua;
++	int ret;
++
++	guard(mutex)(&chip->lock);
++
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++		if (val->intval < 0)
++			return -EINVAL;
++		ua = clamp_t(unsigned int, val->intval,
++			     S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_MAX_UA);
++		ua = rounddown(ua - S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_STEP_UA) +
++		     S2MU005L_INPUT_MIN_UA;
++		ret = s2mu005l_set_input(chip, ua);
++		if (!ret)
++			chip->input_ua = ua;
++		return ret;
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++		if (val->intval < 0)
++			return -EINVAL;
++		ua = clamp_t(unsigned int, val->intval,
++			     S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_MAX_UA);
++		ua = rounddown(ua - S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_STEP_UA) +
++		     S2MU005L_CHARGE_MIN_UA;
++		ret = s2mu005l_set_charge(chip, ua);
++		if (!ret)
++			chip->charge_ua = ua;
++		return ret;
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++		return s2mu005l_set_behaviour(chip, val->intval);
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
++		if (val->intval < 0 || (unsigned int)val->intval >= chip->end_pct)
++			return -EINVAL;
++		WRITE_ONCE(chip->start_pct, val->intval);
++		break;
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		if (val->intval > 100 || val->intval < 0 ||
++		    (unsigned int)val->intval <= chip->start_pct)
++			return -EINVAL;
++		WRITE_ONCE(chip->end_pct, val->intval);
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	/* A threshold changed: the window now controls the mode. */
++	chip->mode_owned = true;
++	s2mu005l_kick(chip);
++	return 0;
++}
++
++static int s2mu005l_property_is_writeable(struct power_supply *psy,
++					  enum power_supply_property psp)
++{
++	switch (psp) {
++	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
++	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
++	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
++	case POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD:
++		return 1;
++	default:
++		return 0;
++	}
++}
++
++static const enum power_supply_property s2mu005l_props[] = {
++	POWER_SUPPLY_PROP_ONLINE,
++	POWER_SUPPLY_PROP_STATUS,
++	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
++	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
++	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD,
++	POWER_SUPPLY_PROP_CHARGE_CONTROL_END_THRESHOLD,
++};
++
++static const struct power_supply_desc s2mu005l_psy_desc = {
++	.name = "s2mu005-lite-charger",
++	.type = POWER_SUPPLY_TYPE_USB,
++	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
++			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
++	.properties = s2mu005l_props,
++	.num_properties = ARRAY_SIZE(s2mu005l_props),
++	.get_property = s2mu005l_get_property,
++	.set_property = s2mu005l_set_property,
++	.property_is_writeable = s2mu005l_property_is_writeable,
++};
++
++/* LED pattern timings in ms, indexed by the register field value. */
++static const u32 s2mu005l_lut_ramp[] = {
++	0, 100, 200, 300, 400, 500, 600, 700,
++	800, 1000, 1200, 1400, 1600, 1800, 2000, 2200,
++};
++
++static const u32 s2mu005l_lut_stay_hi[] = {
++	100, 200, 300, 400, 500, 750, 1000, 1250,
++	1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250,
++};
++
++static const u32 s2mu005l_lut_stay_lo[] = {
++	0, 500, 1000, 1500, 2000, 2500, 3000, 3500,
++	4000, 4500, 5000, 6000, 7000, 8000, 10000, 12000,
++};
++
++/* Closest table index, or -EINVAL if @ms is more than half a step past the end. */
++static int s2mu005l_lut_index(const u32 *lut, size_t len, u32 ms)
++{
++	int best = 0;
++	size_t i;
++
++	if (ms > lut[len - 1] + (lut[len - 1] - lut[len - 2]) / 2)
++		return -EINVAL;
++
++	for (i = 1; i < len; i++)
++		if (abs_diff(ms, lut[i]) < abs_diff(ms, lut[best]))
++			best = i;
++	return best;
++}
++
++static struct s2mu005l *s2mu005l_from_cdev(struct led_classdev *cdev)
++{
++	return container_of(lcdev_to_mccdev(cdev), struct s2mu005l, mc);
++}
++
++/* Reset the RGB block: all channels off. Lock held. */
++static int s2mu005l_led_off(struct s2mu005l *chip)
++{
++	chip->ramp_up = 0;
++	chip->ramp_dn = 0;
++	chip->stay_hi = 0;
++	chip->stay_lo = 0;
++	return s2mu005l_write(chip, S2MU005_REG_RGB_EN, 0xff, S2MU005_RGB_RESET);
++}
++
++/* Write brightness and timings of all channels, then start them. Lock held. */
++static int s2mu005l_led_apply(struct s2mu005l *chip)
++{
++	unsigned int ramp, stay, ch, i;
++	int ret;
++
++	ramp = FIELD_PREP(S2MU005_RGB_CH_RAMP_UP, chip->ramp_up) |
++	       FIELD_PREP(S2MU005_RGB_CH_RAMP_DN, chip->ramp_dn);
++	stay = FIELD_PREP(S2MU005_RGB_CH_STAY_HI, chip->stay_hi) |
++	       FIELD_PREP(S2MU005_RGB_CH_STAY_LO, chip->stay_lo);
++
++	ret = s2mu005l_write(chip, S2MU005_REG_RGB_EN, 0xff, S2MU005_RGB_RESET);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < chip->mc.num_colors; i++) {
++		ch = chip->subled[i].channel;
++		ret = s2mu005l_write(chip, S2MU005_REG_RGB_CH_CTRL(ch), 0xff,
++				     chip->subled[i].brightness);
++		if (ret)
++			return ret;
++		ret = s2mu005l_write(chip, S2MU005_REG_RGB_CH_RAMP(ch), 0xff, ramp);
++		if (ret)
++			return ret;
++		ret = s2mu005l_write(chip, S2MU005_REG_RGB_CH_STAY(ch), 0xff, stay);
++		if (ret)
++			return ret;
++	}
++
++	return s2mu005l_write(chip, S2MU005_REG_RGB_EN, 0xff, S2MU005_RGB_SLOPE_SMOOTH);
++}
++
++static int s2mu005l_led_brightness_set(struct led_classdev *cdev,
++				       enum led_brightness value)
++{
++	struct s2mu005l *chip = s2mu005l_from_cdev(cdev);
++	int ret;
++
++	guard(mutex)(&chip->lock);
++
++	if (value == LED_OFF)
++		return s2mu005l_led_off(chip);
++
++	ret = led_mc_calc_color_components(&chip->mc, value);
++	if (ret)
++		return ret;
++	return s2mu005l_led_apply(chip);
++}
++
++static int s2mu005l_led_blink_set(struct led_classdev *cdev,
++				  unsigned long *delay_on, unsigned long *delay_off)
++{
++	struct s2mu005l *chip = s2mu005l_from_cdev(cdev);
++	unsigned int brightness = cdev->brightness ?: cdev->max_brightness;
++	u32 on = min_t(unsigned long, *delay_on, U16_MAX);
++	u32 off = min_t(unsigned long, *delay_off, U16_MAX);
++	int hi, lo, ret;
++
++	if (!on && !off) {
++		on = 500;
++		off = 500;
++	}
++
++	hi = s2mu005l_lut_index(s2mu005l_lut_stay_hi, ARRAY_SIZE(s2mu005l_lut_stay_hi), on);
++	lo = s2mu005l_lut_index(s2mu005l_lut_stay_lo, ARRAY_SIZE(s2mu005l_lut_stay_lo), off);
++	if (hi < 0 || lo < 0)
++		return -EINVAL;	/* the LED core falls back to software blinking */
++
++	guard(mutex)(&chip->lock);
++
++	chip->ramp_up = 0;
++	chip->ramp_dn = 0;
++	chip->stay_hi = hi;
++	chip->stay_lo = lo;
++	ret = led_mc_calc_color_components(&chip->mc, brightness);
++	if (!ret)
++		ret = s2mu005l_led_apply(chip);
++	if (ret)
++		return ret;
++
++	*delay_on = s2mu005l_lut_stay_hi[hi];
++	*delay_off = s2mu005l_lut_stay_lo[lo];
++	return 0;
++}
++
++/*
++ * Hardware pattern: one non-zero brightness level (HIGH) and zero (LOW),
++ * repeated forever. The HIGH time is split into ramp up, stay and ramp down;
++ * a tuple with a non-zero delta_t ramps towards the next tuple, as the
++ * pattern trigger does in software.
++ */
++static int s2mu005l_led_pattern_set(struct led_classdev *cdev,
++				    struct led_pattern *pattern, u32 len, int repeat)
++{
++	struct s2mu005l *chip = s2mu005l_from_cdev(cdev);
++	bool ramp_up = false, ramp_dn = false;
++	u32 time_hi = 0, time_lo = 0, i;
++	int peak = 0, up = 0, dn = 0, hi, lo, ret;
++
++	if (repeat != -1 || len < 2)
++		return -EINVAL;
++
++	for (i = 0; i < len; i++) {
++		if (pattern[i].brightness) {
++			if (peak && peak != pattern[i].brightness)
++				return -EINVAL;
++			peak = pattern[i].brightness;
++			time_hi += pattern[i].delta_t;
++			ramp_dn = pattern[i].delta_t;
++		} else {
++			time_lo += pattern[i].delta_t;
++			ramp_up = pattern[i].delta_t;
++		}
++	}
++	if (!peak)
++		return -EINVAL;
++
++	if (ramp_up) {
++		up = s2mu005l_lut_index(s2mu005l_lut_ramp, ARRAY_SIZE(s2mu005l_lut_ramp),
++					time_hi / 3);
++		if (up < 0)
++			return up;
++	}
++	if (ramp_dn) {
++		dn = s2mu005l_lut_index(s2mu005l_lut_ramp, ARRAY_SIZE(s2mu005l_lut_ramp),
++					time_hi / 3);
++		if (dn < 0)
++			return dn;
++	}
++	time_hi -= min(time_hi, s2mu005l_lut_ramp[up]);
++	time_hi -= min(time_hi, s2mu005l_lut_ramp[dn]);
++
++	hi = s2mu005l_lut_index(s2mu005l_lut_stay_hi, ARRAY_SIZE(s2mu005l_lut_stay_hi), time_hi);
++	if (hi < 0)
++		return hi;
++	lo = s2mu005l_lut_index(s2mu005l_lut_stay_lo, ARRAY_SIZE(s2mu005l_lut_stay_lo), time_lo);
++	if (lo < 0)
++		return lo;
++
++	guard(mutex)(&chip->lock);
++
++	chip->ramp_up = up;
++	chip->ramp_dn = dn;
++	chip->stay_hi = hi;
++	chip->stay_lo = lo;
++	ret = led_mc_calc_color_components(&chip->mc,
++					   min_t(int, peak, cdev->max_brightness));
++	if (ret)
++		return ret;
++	return s2mu005l_led_apply(chip);
++}
++
++static int s2mu005l_led_pattern_clear(struct led_classdev *cdev)
++{
++	struct s2mu005l *chip = s2mu005l_from_cdev(cdev);
++
++	guard(mutex)(&chip->lock);
++	return s2mu005l_led_off(chip);
++}
++
++static int s2mu005l_led_register(struct s2mu005l *chip)
++{
++	static const unsigned int colors[S2MU005L_NUM_COLORS] = {
++		LED_COLOR_ID_RED, LED_COLOR_ID_GREEN, LED_COLOR_ID_BLUE,
++	};
++	/* Register channel: 0 blue, 1 green, 2 red. */
++	static const unsigned int channels[S2MU005L_NUM_COLORS] = { 2, 1, 0 };
++	struct led_classdev *cdev = &chip->mc.led_cdev;
++	int i;
++
++	for (i = 0; i < S2MU005L_NUM_COLORS; i++) {
++		chip->subled[i].color_index = colors[i];
++		chip->subled[i].channel = channels[i];
++		chip->subled[i].intensity = LED_FULL;
++	}
++	chip->mc.subled_info = chip->subled;
++	chip->mc.num_colors = S2MU005L_NUM_COLORS;
++
++	cdev->name = "rgb:status";
++	cdev->max_brightness = LED_FULL;
++	cdev->brightness_set_blocking = s2mu005l_led_brightness_set;
++	cdev->blink_set = s2mu005l_led_blink_set;
++	cdev->pattern_set = s2mu005l_led_pattern_set;
++	cdev->pattern_clear = s2mu005l_led_pattern_clear;
++	/* Leave the LED as it is on unbind: no write that was not asked for. */
++	cdev->flags = LED_RETAIN_AT_SHUTDOWN;
++
++	return devm_led_classdev_multicolor_register(chip->dev, &chip->mc);
++}
++
++/* On unbind, do not leave charging off if this driver switched it off. */
++static void s2mu005l_release(void *data)
++{
++	struct s2mu005l *chip = data;
++	unsigned int status0, ctrl0;
++
++	guard(mutex)(&chip->lock);
++
++	if (!chip->mode_owned ||
++	    regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0) ||
++	    regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL0, &ctrl0))
++		return;
++	if ((status0 & S2MU005_CHGR_VBUS) &&
++	    FIELD_GET(S2MU005_CHGR_OP_MODE, ctrl0) == S2MU005L_MODE_BUCK)
++		s2mu005l_set_mode(chip, S2MU005L_MODE_CHARGE);
++}
++
++static int s2mu005l_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct power_supply_config cfg = {};
++	unsigned int id, status0, ctrl0, ctrl2, ctrl7, ctrl8;
++	struct s2mu005l *chip;
++	int ret;
++
++	chip = devm_kzalloc(dev, sizeof(*chip), GFP_KERNEL);
++	if (!chip)
++		return -ENOMEM;
++	chip->dev = dev;
++
++	chip->regmap = devm_regmap_init_i2c(client, &s2mu005l_regmap_config);
++	if (IS_ERR(chip->regmap))
++		return dev_err_probe(dev, PTR_ERR(chip->regmap), "regmap init failed\n");
++
++	/* Reads only from here on: nothing is written during probe. */
++	ret = regmap_read(chip->regmap, S2MU005_REG_ID, &id);
++	if (ret)
++		return dev_err_probe(dev, ret, "no answer\n");
++	if (id != S2MU005L_ID)
++		return dev_err_probe(dev, -ENODEV, "ID register %#x, expected %#x\n",
++				     id, S2MU005L_ID);
++
++	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
++	if (!ret)
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL0, &ctrl0);
++	if (!ret)
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL2, &ctrl2);
++	if (!ret)
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL7, &ctrl7);
++	if (!ret)
++		ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_CTRL8, &ctrl8);
++	if (ret)
++		return dev_err_probe(dev, ret, "charger registers unreadable\n");
++
++	ret = devm_mutex_init(dev, &chip->lock);
++	if (ret)
++		return ret;
++
++	chip->end_pct = 100;
++	if (auto_policy) {
++		chip->input_ua = clamp_t(unsigned int, input_limit_ua,
++					 S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_MAX_UA);
++		chip->charge_ua = clamp_t(unsigned int, charge_current_ua,
++					  S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_MAX_UA);
++		if (start_threshold < end_threshold && end_threshold <= 100) {
++			chip->start_pct = start_threshold;
++			chip->end_pct = end_threshold;
++		} else {
++			dev_warn(dev, "bad thresholds %u/%u: window off\n",
++				 start_threshold, end_threshold);
++		}
++		chip->mode_owned = true;
++	}
++	chip->last_status0 = status0;
++	chip->last_mode = FIELD_GET(S2MU005_CHGR_OP_MODE, ctrl0);
++	chip->poll_jiffies = msecs_to_jiffies(max_t(unsigned int, poll_ms, S2MU005L_POLL_MIN_MS));
++
++	cfg.drv_data = chip;
++	cfg.fwnode = dev_fwnode(dev);
++	chip->psy = devm_power_supply_register(dev, &s2mu005l_psy_desc, &cfg);
++	if (IS_ERR(chip->psy))
++		return dev_err_probe(dev, PTR_ERR(chip->psy), "power supply registration failed\n");
++
++	ret = s2mu005l_led_register(chip);
++	if (ret)
++		return dev_err_probe(dev, ret, "LED registration failed\n");
++
++	/* Registered before the poll so that it runs after the poll is cancelled. */
++	ret = devm_add_action_or_reset(dev, s2mu005l_release, chip);
++	if (ret)
++		return ret;
++
++	ret = devm_delayed_work_autocancel(dev, &chip->poll, s2mu005l_poll);
++	if (ret)
++		return ret;
++	queue_delayed_work(system_freezable_wq, &chip->poll, chip->poll_jiffies);
++
++	dev_info(dev, "ID %#x, VBUS %s, mode %lu, input %u uA, charge %u uA, float %u uV, policy %s\n",
++		 id, status0 & S2MU005_CHGR_VBUS ? "yes" : "no",
++		 FIELD_GET(S2MU005_CHGR_OP_MODE, ctrl0), s2mu005l_input_ua(ctrl2),
++		 s2mu005l_charge_ua(ctrl7), s2mu005l_float_uv(ctrl8),
++		 auto_policy ? "auto" : "off");
++	return 0;
++}
++
++static const struct of_device_id s2mu005l_of_match[] = {
++	{ .compatible = "samsung,s2mu005-lite" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, s2mu005l_of_match);
++
++static const struct i2c_device_id s2mu005l_id[] = {
++	{ "s2mu005-lite" },
++	{ }
++};
++MODULE_DEVICE_TABLE(i2c, s2mu005l_id);
++
++static struct i2c_driver s2mu005l_driver = {
++	.driver = {
++		.name = "s2mu005-lite",
++		.of_match_table = s2mu005l_of_match,
++	},
++	.probe = s2mu005l_probe,
++	.id_table = s2mu005l_id,
++};
++module_i2c_driver(s2mu005l_driver);
++
++MODULE_DESCRIPTION("Samsung S2MU005 charger and RGB LED, standalone I2C client");
++MODULE_LICENSE("GPL");
