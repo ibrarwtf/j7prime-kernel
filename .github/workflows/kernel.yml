@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "kernel = Image+modules+DTBs | stock-module = modules for the stock 6.15.0-exynos7870 | dtb = device trees only"
+        description: "kernel = Image+modules+DTBs | stock-module = modules for the stock 6.15.0-exynos7870 | dtb = device trees only | stable = pmaports linux-postmarketos-stable 7.3.4 recipe + build id (arm64 runner, Alpine)"
         type: choice
-        options: [kernel, stock-module, dtb]
+        options: [kernel, stock-module, dtb, stable]
         default: kernel
       builds:
-        description: "build ids, comma-separated (<dir>/<id>.fragment + on7xelte-<id>.dtsi + patches/<id>/); kernel/dtb modes"
+        description: "build ids, comma-separated (<dir>/<id>.fragment + on7xelte-<id>.dtsi + patches/<id>/); kernel/dtb/stable modes (stable: <dir>/<id>.fragment + patches/7.3.4/)"
         default: "b1"
       repo:
         description: "kernel git URL (kernel/dtb modes)"
@@ -21,7 +21,7 @@ on:
         description: "base config file under kernel/"
         default: "kernel/base-6.15.config"
       build_dir:
-        description: "directory holding the build ids"
+        description: "directory holding the build ids (stable mode: kernel/7.3.4)"
         default: "kernel/7.1"
       modules:
         description: "stock-module: config symbols to build as modules, comma-separated"
@@ -324,3 +324,51 @@ jobs:
         run: |
           tag="stock-6.15.0-exynos7870-${{ github.run_number }}"
           gh release create "$tag" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$tag" --notes-file out/source.txt
+
+  stable:
+    needs: setup
+    if: inputs.mode == 'stable'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 345
+    strategy:
+      fail-fast: false
+      matrix:
+        build: ${{ fromJSON(needs.setup.outputs.builds) }}
+    env:
+      BUILD: ${{ matrix.build }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "T0=$(date +%s)" >> "$GITHUB_ENV"; df -h / | tail -1; nproc
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: /home/runner/.cache/ccache-stable
+          key: ccache-stable-7.3.4-${{ matrix.build }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-stable-7.3.4-${{ matrix.build }}-
+            ccache-stable-7.3.4-
+      - name: Build in Alpine edge (native arm64, LLVM=1 like the APKBUILD)
+        run: |
+          set -euo pipefail
+          mkdir -p /home/runner/.cache/ccache-stable out
+          PKGS="bash bison clang clang-libclang diffutils elfutils-dev findutils flex grep kmod linux-headers lld llvm
+            openssl-dev pahole perl python3 rust rust-bindgen rust-src rustfmt sed zstd xz tar curl patch ccache coreutils make gzip"
+          docker run --rm -v "$PWD:/w" -v /home/runner/.cache/ccache-stable:/ccache -w /w \
+            -e CCACHE_DIR=/ccache -e CCACHE_MAXSIZE=6G -e BUILD -e BUILD_DIR -e OUT=/w/out -e PKGS="$PKGS" \
+            alpine:edge sh -euc 'apk add -q $PKGS && sh scripts/stable-build.sh'
+          sudo chown -R "$(id -u):$(id -g)" out /home/runner/.cache/ccache-stable
+          cd out && sha256sum * > SHA256SUMS && ls -la
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.build }}
+          path: out/
+          retention-days: 3
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### stable \`$BUILD\`: \`$(cat out/release.txt 2>/dev/null)\`, $(( ($(date +%s) - T0) / 60 )) min"
+            echo '```'; cat out/source.txt 2>/dev/null; echo '```'
+            echo "<details><summary>config diff vs config-stable.aarch64</summary>"; echo; echo '```'
+            cat out/config.diff 2>/dev/null; echo '```'; echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,132 @@
+Subject: arm64: dts: exynos7870-on7xelte: j7prime parity nodes (watchdog, IF-PMIC i2c-gpio, fuel gauge, touch keys)
+
+Brings the upstream v7.3.4 on7xelte DTS to feature parity with the
+postmarketOS 6.15 exynos7870 device tree used on our SM-G610F:
+- watchdog@10170000 (samsung,exynos7-wdt, CMU_PERI WDT_CPUCL0 gate, PMU syscon)
+- i2c-gpio-ifpmic: bit-banged bus on gpc1-0 (SDA) / gpc1-1 (SCL), the I2C4
+  pins of the S2MU005. NO client node and i2c@13870000 stays disabled, so no
+  kernel driver can ever bind the charger/MUIC/LED chip.
+- i2c@13830000 (I2C0) + fuelgauge@3b "samsung,s2mu005-fg" (needs 0002)
+- i2c@13850000 (I2C2) + touchkey@49 "melfas,mip4_touchkey" (needs 0003),
+  KEY_MENU/KEY_BACK, vdd = S2MPU05 LDO34
+- ramoops@46e00000 is left as upstream, which already is the 6.15 layout
+  (console 16 KiB + pmsg 16 KiB); the build enables PSTORE_RAM/CONSOLE/PMSG.
+
+Node contents follow the 6.15 DT (linux-postmarketos-exynos7870 6.15-r6,
+exynos7870-mainline/mainline-patches@5686e3b5) with phandles written as labels.
+Against: linux v7.3.4. License: GPL-2.0 (kernel DTS).
+
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -62,6 +62,26 @@
+ 		};
+ 	};
+ 
++	/*
++	 * S2MU005 (charger/MUIC/LED) bus, bit-banged on the I2C4 pins. The
++	 * hardware controller i2c@13870000 on these pins must stay disabled
++	 * (enabling it hangs this board). No client node on purpose: nothing
++	 * may bind the charger chip; userspace talks to it via i2c-dev.
++	 */
++	i2c-gpio-ifpmic {
++		compatible = "i2c-gpio";
++		sda-gpios = <&gpc1 0 GPIO_OPEN_DRAIN>;
++		scl-gpios = <&gpc1 1 GPIO_OPEN_DRAIN>;
++		i2c-gpio,delay-us = <5>;
++		i2c-gpio,timeout-ms = <100>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&ifpmic_gpio_pins>;
++
++		#address-cells = <1>;
++		#size-cells = <0>;
++	};
++
+ 	memory@40000000 {
+ 		device_type = "memory";
+ 		reg = <0x0 0x40000000 0x3e400000>,
+@@ -397,6 +417,23 @@
+ 	};
+ };
+ 
++&i2c0 {
++	samsung,i2c-sda-delay = <100>;
++	samsung,i2c-max-bus-freq = <400000>;
++
++	status = "okay";
++
++	fuelgauge@3b {
++		compatible = "samsung,s2mu005-fg";
++		reg = <0x3b>;
++		interrupt-parent = <&gpa0>;
++		interrupts = <3 IRQ_TYPE_EDGE_BOTH>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&fuel_irq>;
++	};
++};
++
+ &i2c1 {
+ 	samsung,i2c-sda-delay = <100>;
+ 	samsung,i2c-max-bus-freq = <400000>;
+@@ -434,6 +471,27 @@
+ 	};
+ };
+ 
++&i2c2 {
++	samsung,i2c-sda-delay = <100>;
++	samsung,i2c-max-bus-freq = <400000>;
++
++	status = "okay";
++
++	touchkey@49 {
++		compatible = "melfas,mip4_touchkey";
++		reg = <0x49>;
++		interrupt-parent = <&gpa1>;
++		interrupts = <4 IRQ_TYPE_LEVEL_LOW>;
++
++		pinctrl-names = "default";
++		pinctrl-0 = <&tkey_irq>;
++
++		vdd-supply = <&vdd_ldo34>;
++
++		linux,keycodes = <KEY_MENU KEY_BACK>;
++	};
++};
++
+ &i2c7 {
+ 	samsung,i2c-sda-delay = <100>;
+ 	samsung,i2c-max-bus-freq = <400000>;
+@@ -644,6 +702,13 @@
+ 		samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR4>;
+ 		samsung,pin-val = <0>;
+ 	};
++
++	ifpmic_gpio_pins: ifpmic-i2cgpio-pins {
++		samsung,pins = "gpc1-1", "gpc1-0";
++		samsung,pin-function = <EXYNOS_PIN_FUNC_INPUT>;
++		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
++		samsung,pin-drv = <EXYNOS5433_PIN_DRV_FAST_SR1>;
++	};
+ };
+ 
+ &pinctrl_touch {
+@@ -676,6 +741,18 @@
+ 	status = "okay";
+ };
+ 
++&soc {
++	watchdog@10170000 {
++		compatible = "samsung,exynos7-wdt";
++		reg = <0x10170000 0x100>;
++		interrupts = <GIC_SPI 100 IRQ_TYPE_LEVEL_HIGH>;
++		clocks = <&cmu_peri CLK_GOUT_PERI_WDT_CPUCL0_PCLK>;
++		clock-names = "watchdog";
++		samsung,syscon-phandle = <&pmu_system_controller>;
++		timeout-sec = <30>;
++	};
++};
++
+ &usbdrd {
+ 	vdd33-supply = <&vdd_ldo8>;
+ 
