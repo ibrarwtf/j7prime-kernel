@@ -1,0 +1,58 @@
+Subject: [PATCH] arm64: dts: exynos7870-on7xelte: describe the TD4300 panel reset and supplies
+
+Origin: j7prime touch investigation (not upstream). Base: Linux v7.3.4 +
+patches 0001-0004. OPTIONAL: built as a separate DTB variant; do not use
+for the first touch tests.
+
+Upstream gives the TD4300 panel only backlight-gpios, so panel-synaptics-tddi
+gets dummy vio/vsn/vsp supplies and no reset line and can never power-cycle
+or reset the TDDI chip (display + touch). Samsung's DT for on7xelte
+(exynos7870-on7xelte_common.dtsi, decon_board) uses:
+  LCD_1P8 = PMIC LDO30 (vio), gpio_panel_enp = gpd3-7, gpio_panel_enn = gpd4-0,
+  gpio_lcd_rst = gpd3-4 (pulse high-low-high), gpio_blic_on = gpd3-5.
+Describe those so blank/unblank really re-initialises the chip. Because the
+reset line is shared by display and touch on a TDDI, every panel prepare also
+resets the touch controller; rmi4 recovers through the F01 attention handler
+only if F01 is bound (needs 0001/0002 first). Both regulators are
+regulator-boot-on so the bootloader's state is kept at probe.
+---
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -83,6 +83,25 @@
+ 		enable-active-high;
+ 	};
+ 
++	/* TDDI panel bias: ISL98611 positive/negative output enables (ENP/ENN) */
++	vsn_panel: regulator-panel-vsn {
++		compatible = "regulator-fixed";
++		regulator-name = "panel_vsn";
++		gpio = <&gpd4 0 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++		startup-delay-us = <10000>;
++	};
++
++	vsp_panel: regulator-panel-vsp {
++		compatible = "regulator-fixed";
++		regulator-name = "panel_vsp";
++		gpio = <&gpd3 7 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++		startup-delay-us = <2000>;
++	};
++
+ 	reserved-memory {
+ 		#address-cells = <2>;
+ 		#size-cells = <1>;
+@@ -131,6 +150,11 @@
+ 		reg = <0>;
+ 
+ 		backlight-gpios = <&gpd3 5 GPIO_ACTIVE_LOW>;
++		reset-gpios = <&gpd3 4 GPIO_ACTIVE_LOW>;
++
++		vio-supply = <&vdd_ldo30>;
++		vsn-supply = <&vsn_panel>;
++		vsp-supply = <&vsp_panel>;
+ 
+ 		width-mm = <68>;
+ 		height-mm = <121>;

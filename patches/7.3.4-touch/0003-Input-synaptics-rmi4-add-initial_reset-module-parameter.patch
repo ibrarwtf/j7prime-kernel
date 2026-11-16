@@ -1,0 +1,51 @@
+Subject: [PATCH 3/4] Input: synaptics-rmi4 - add an initial_reset module parameter
+
+Origin: j7prime touch investigation, DEBUG KNOB (not for upstream as is).
+Base: Linux v7.3.4.
+
+rmi_driver_probe() always soft-resets the sensor before the PDT scan. The
+vendor driver for the TD4300 TDDI (Samsung td4x00 synaptics_i2c_rmi.c) never
+does this at probe: the bootloader has already brought the display and touch
+firmware up together. rmi_core.initial_reset=0 (kernel command line or
+modprobe.d) skips the reset so the two behaviours can be compared on the
+phone without rebuilding. Default behaviour is unchanged.
+---
+--- a/drivers/input/rmi4/rmi_driver.c
++++ b/drivers/input/rmi4/rmi_driver.c
+@@ -19,6 +19,7 @@
+ #include <linux/slab.h>
+ #include <linux/of.h>
+ #include <linux/irqdomain.h>
++#include <linux/moduleparam.h>
+ #include <uapi/linux/input.h>
+ #include <linux/rmi.h>
+ #include <linux/export.h>
+@@ -34,6 +35,11 @@
+ #define RMI_DEVICE_RESET_CMD	0x01
+ #define DEFAULT_RESET_DELAY_MS	100
+ 
++static bool initial_reset = true;
++module_param(initial_reset, bool, 0644);
++MODULE_PARM_DESC(initial_reset,
++		 "Soft-reset the sensor before scanning the PDT (default: true)");
++
+ void rmi_free_function_list(struct rmi_device *rmi_dev)
+ {
+ 	struct rmi_function *fn, *tmp;
+@@ -1215,9 +1221,13 @@
+ 	 * and leave the customer's device unusable.  So we warn them, and
+ 	 * continue processing.
+ 	 */
+-	retval = rmi_scan_pdt(rmi_dev, NULL, rmi_initial_reset);
+-	if (retval < 0)
+-		dev_warn(dev, "RMI initial reset failed! Continuing in spite of this.\n");
++	if (initial_reset) {
++		retval = rmi_scan_pdt(rmi_dev, NULL, rmi_initial_reset);
++		if (retval < 0)
++			dev_warn(dev, "RMI initial reset failed! Continuing in spite of this.\n");
++	} else {
++		dev_info(dev, "Skipping the initial reset (initial_reset=0)\n");
++	}
+ 
+ 	retval = rmi_read(rmi_dev, PDT_PROPERTIES_LOCATION, &data->pdt_props);
+ 	if (retval < 0) {

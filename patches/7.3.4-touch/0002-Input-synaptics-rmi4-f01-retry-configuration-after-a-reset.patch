@@ -1,0 +1,181 @@
+Subject: [PATCH 2/4] Input: synaptics-rmi4 - f01: retry configuration when the device resets during probe
+
+Origin: j7prime touch investigation (not upstream). Base: Linux v7.3.4.
+
+rmi_f01_probe() sets the "configured" bit in F01_RMI_Ctrl0 and, at the end,
+fails with -EINVAL if F01_RMI_Data0 still reports the device as
+unconfigured. On the Synaptics TD4300 TDDI (Samsung Galaxy J7 Prime) this
+happens on every boot (status code 1 = reset) because the chip has not
+finished coming back from the rmi4 initial reset; F01 is then never bound,
+the F01 attention handler that would recover from later resets never runs,
+and the touchscreen is dead.
+
+Instead of giving up, wait 100 ms and apply the configuration again, up to 10
+times (1 s). Successful probes are unchanged (no retry, no delay). The doze
+registers are not rewritten on retry; their default (pdata = 0) path only
+reads them.
+---
+--- a/drivers/input/rmi4/rmi_f01.c
++++ b/drivers/input/rmi4/rmi_f01.c
+@@ -4,6 +4,7 @@
+  * Copyright (c) 2011 Unixphere
+  */
+ 
++#include <linux/delay.h>
+ #include <linux/kernel.h>
+ #include <linux/rmi.h>
+ #include <linux/slab.h>
+@@ -102,6 +103,13 @@
+  */
+ #define RMI_F01_CTRL0_CONFIGURED_BIT	BIT(7)
+ 
++/*
++ * How often, and how far apart, to re-apply the configuration when the device
++ * reports that it was reset while we were configuring it.
++ */
++#define RMI_F01_CONFIG_RETRIES		10
++#define RMI_F01_CONFIG_RETRY_MS		100
++
+ /**
+  * struct f01_device_control - controls basic sensor functions
+  *
+@@ -380,33 +388,15 @@
+ }
+ #endif
+ 
+-static int rmi_f01_probe(struct rmi_function *fn)
++/*
++ * Read-modify-write F01_RMI_Ctrl0: apply the nosleep setting, clear a stale
++ * sleep mode and set the "configured" bit.
++ */
++static int rmi_f01_write_ctrl0(struct rmi_function *fn, struct f01_data *f01,
++			       struct rmi_device_platform_data *pdata)
+ {
+ 	struct rmi_device *rmi_dev = fn->rmi_dev;
+-	struct rmi_driver_data *driver_data = dev_get_drvdata(&rmi_dev->dev);
+-	struct rmi_device_platform_data *pdata = rmi_get_platform_data(rmi_dev);
+-	struct f01_data *f01;
+ 	int error;
+-	u16 ctrl_base_addr = fn->fd.control_base_addr;
+-	u8 device_status;
+-	u8 temp;
+-
+-	if (fn->dev.of_node) {
+-		error = rmi_f01_of_probe(&fn->dev, pdata);
+-		if (error)
+-			return error;
+-	}
+-
+-	f01 = devm_kzalloc(&fn->dev, sizeof(struct f01_data), GFP_KERNEL);
+-	if (!f01)
+-		return -ENOMEM;
+-
+-	f01->num_of_irq_regs = driver_data->num_of_irq_regs;
+-
+-	/*
+-	 * Set the configured bit and (optionally) other important stuff
+-	 * in the device control register.
+-	 */
+ 
+ 	error = rmi_read(rmi_dev, fn->fd.control_base_addr,
+ 			 &f01->device_control.ctrl0);
+@@ -447,6 +437,41 @@
+ 		return error;
+ 	}
+ 
++	return 0;
++}
++
++static int rmi_f01_probe(struct rmi_function *fn)
++{
++	struct rmi_device *rmi_dev = fn->rmi_dev;
++	struct rmi_driver_data *driver_data = dev_get_drvdata(&rmi_dev->dev);
++	struct rmi_device_platform_data *pdata = rmi_get_platform_data(rmi_dev);
++	struct f01_data *f01;
++	int tries;
++	int error;
++	u16 ctrl_base_addr = fn->fd.control_base_addr;
++	u8 device_status;
++	u8 temp;
++
++	if (fn->dev.of_node) {
++		error = rmi_f01_of_probe(&fn->dev, pdata);
++		if (error)
++			return error;
++	}
++
++	f01 = devm_kzalloc(&fn->dev, sizeof(struct f01_data), GFP_KERNEL);
++	if (!f01)
++		return -ENOMEM;
++
++	f01->num_of_irq_regs = driver_data->num_of_irq_regs;
++
++	/*
++	 * Set the configured bit and (optionally) other important stuff
++	 * in the device control register.
++	 */
++	error = rmi_f01_write_ctrl0(fn, f01, pdata);
++	if (error)
++		return error;
++
+ 	/* Dummy read in order to clear irqs */
+ 	error = rmi_read(rmi_dev, fn->fd.data_base_addr + 1, &temp);
+ 	if (error < 0) {
+@@ -552,20 +577,46 @@
+ 		}
+ 	}
+ 
+-	error = rmi_read(rmi_dev, fn->fd.data_base_addr, &device_status);
+-	if (error < 0) {
+-		dev_err(&fn->dev,
+-			"Failed to read device status: %d\n", error);
+-		return error;
+-	}
++	for (tries = 0; ; tries++) {
++		error = rmi_read(rmi_dev, fn->fd.data_base_addr,
++				 &device_status);
++		if (error < 0) {
++			dev_err(&fn->dev,
++				"Failed to read device status: %d\n", error);
++			return error;
++		}
++
++		if (!RMI_F01_STATUS_UNCONFIGURED(device_status))
++			break;
+ 
+-	if (RMI_F01_STATUS_UNCONFIGURED(device_status)) {
+-		dev_err(&fn->dev,
+-			"Device was reset during configuration process, status: %#02x!\n",
+-			RMI_F01_STATUS_CODE(device_status));
+-		return -EINVAL;
++		if (tries >= RMI_F01_CONFIG_RETRIES) {
++			dev_err(&fn->dev,
++				"Device was reset during configuration process, status: %#02x!\n",
++				RMI_F01_STATUS_CODE(device_status));
++			return -EINVAL;
++		}
++
++		/*
++		 * Some sensors (e.g. Synaptics TDDI parts such as the TD4300)
++		 * take longer than reset_delay_ms to come back from the
++		 * initial reset and drop the configured bit we just set.
++		 * Give them time and configure again instead of giving up.
++		 */
++		dev_warn(&fn->dev,
++			 "Device reset during configuration (status: %#02x), retry %d/%d in %d ms\n",
++			 RMI_F01_STATUS_CODE(device_status), tries + 1,
++			 RMI_F01_CONFIG_RETRIES, RMI_F01_CONFIG_RETRY_MS);
++		msleep(RMI_F01_CONFIG_RETRY_MS);
++
++		error = rmi_f01_write_ctrl0(fn, f01, pdata);
++		if (error)
++			return error;
+ 	}
+ 
++	if (tries)
++		dev_info(&fn->dev, "Device configured after %d retries\n",
++			 tries);
++
+ 	dev_set_drvdata(&fn->dev, f01);
+ 
+ 	error = sysfs_create_group(&fn->rmi_dev->dev.kobj, &rmi_f01_attr_group);

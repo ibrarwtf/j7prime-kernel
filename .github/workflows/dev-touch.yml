@@ -1,0 +1,141 @@
+name: dev-touch
+
+# Compile test for the on7xelte touchscreen patches (patches/7.3.4-touch/).
+# Linux 7.3.4 from cdn.kernel.org + the pmaports linux-postmarketos-stable package patches and
+# config-stable.aarch64, then our patches; clang/LLVM; builds the rmi4 objects, the TDDI panel
+# object and the on7xelte DTBs. No Image, no modules_install: a small artifact only.
+
+on:
+  push:
+    branches: [touch-dev]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  KVER: "7.3.4"
+  KBASE: "7.3"
+  # postmarketOS/pmaports (Nura mirror), commit "linux-postmarketos-stable: Upgrade to 7.3.4"
+  PMAPORTS: https://gitlab.nura.eco/api/v4/projects/226/repository/files
+  PMAPORTS_COMMIT: f86f71a06a2ceab7ba995f331d2fd858cd623893
+  PKGDIR: device%2Fmain%2Flinux-postmarketos-stable
+  PATCHDIR: patches/7.3.4-touch
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm bc bison flex libssl-dev libelf-dev device-tree-compiler xz-utils >/dev/null
+          clang --version | head -1
+
+      - name: Fetch Linux 7.3.4 + pmaports package files (checksummed)
+        run: |
+          set -euo pipefail
+          mkdir -p ~/w && cd ~/w
+          get_pm() { curl -fsSL -o "$1" "$PMAPORTS/$PKGDIR%2F$1/raw?ref=$PMAPORTS_COMMIT"; }
+          get_pm APKBUILD
+          grep -q "^pkgver=$KVER$" APKBUILD
+          sed -n '/^sha512sums="/,/^"/p' APKBUILD | grep -E '^[0-9a-f]{128}  ' > sums.txt
+          sed -n '/^source="/,/^"/p' APKBUILD | grep -oE '[0-9]{4}-[^ ]+\.patch' > srcpatches.txt || true
+          for f in $(cat srcpatches.txt) config-stable.aarch64; do get_pm "$f"; done
+          curl -fsSL -o linux-$KBASE.tar.xz https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-$KBASE.tar.xz
+          curl -fsSL -o patch-$KVER.patch.xz https://cdn.kernel.org/pub/linux/kernel/v7.x/patch-$KVER.xz
+          for f in linux-$KBASE.tar.xz patch-$KVER.patch.xz $(cat srcpatches.txt) config-stable.aarch64; do
+            grep "  $f\$" sums.txt | sha512sum -c - >/dev/null || { echo "::error::sha512 mismatch for $f"; exit 1; }
+          done
+          echo "pmaports patches: $(tr '\n' ' ' < srcpatches.txt)"
+
+      - name: Unpack, apply pmaports + touch patches
+        run: |
+          set -euo pipefail
+          cd ~/w
+          tar xJf linux-$KBASE.tar.xz
+          cd linux-$KBASE
+          xz -dc ../patch-$KVER.patch.xz | patch -p1 -s
+          for p in $(cat ../srcpatches.txt); do patch -p1 -s < ../$p; done
+          git init -q . && git add -A >/dev/null && git -c user.name=ci -c user.email=ci@localhost commit -qm base
+          n=0
+          for p in "$GITHUB_WORKSPACE/$PATCHDIR"/*.patch; do
+            echo "== $(basename "$p")"
+            patch -p1 --no-backup-if-mismatch < "$p"
+            n=$((n + 1))
+          done
+          echo "applied $n touch patches"
+          git diff --stat
+
+      - name: Configure (config-stable.aarch64, rmi4 + TDDI panel as modules)
+        run: |
+          set -euo pipefail
+          cd ~/w/linux-$KBASE
+          cp ../config-stable.aarch64 .config
+          ./scripts/config --module RMI4_CORE --module RMI4_I2C --enable RMI4_F12 --enable RMI4_F34 \
+            --module DRM_PANEL_SYNAPTICS_TDDI
+          make -s ARCH=arm64 LLVM=1 olddefconfig
+          grep -E '^CONFIG_(RMI4_(CORE|I2C|F12|F34)|DRM_PANEL_SYNAPTICS_TDDI)=' .config | tee ~/w/config-touch.txt
+          [ "$(grep -c . ~/w/config-touch.txt)" = 5 ] || { echo "::error::touch symbols missing after olddefconfig"; exit 1; }
+
+      - name: Build rmi4 + panel objects (W=1) and DTBs
+        run: |
+          set -euo pipefail
+          cd ~/w/linux-$KBASE
+          mk() { make -j"$(nproc)" ARCH=arm64 LLVM=1 "$@"; }
+          mk -s prepare
+          mk W=1 drivers/input/rmi4/ drivers/gpu/drm/panel/panel-synaptics-tddi.o 2>&1 | tee ~/w/build.log
+          if grep -E 'rmi_(f01|driver)\.c.*(warning|error)' ~/w/build.log; then echo "::error::warnings in touched files"; exit 1; fi
+          ls -la drivers/input/rmi4/rmi_core.o drivers/input/rmi4/rmi_i2c.o drivers/gpu/drm/panel/panel-synaptics-tddi.o
+          mkdir -p ~/w/out
+          mk exynos/exynos7870-on7xelte.dtb
+          cp arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dtb ~/w/out/exynos7870-on7xelte-touch.dtb
+          for p in "$GITHUB_WORKSPACE/$PATCHDIR"/optional/*.patch; do
+            [ -e "$p" ] || continue
+            echo "== optional $(basename "$p")"
+            patch -p1 --no-backup-if-mismatch < "$p"
+          done
+          mk exynos/exynos7870-on7xelte.dtb
+          cp arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dtb ~/w/out/exynos7870-on7xelte-touch-panel.dtb
+          cd ~/w/out
+          for d in *.dtb; do dtc -q -I dtb -O dts -o "${d%.dtb}.dts" "$d"; done
+          T=/soc@0/i2c@13840000/touchscreen@70
+          echo "touch reset-delay-ms: $(fdtget exynos7870-on7xelte-touch.dtb $T syna,reset-delay-ms)"
+          [ "$(fdtget exynos7870-on7xelte-touch.dtb $T syna,reset-delay-ms)" = 1000 ]
+          P=/soc@0/dsi@14800000/panel@0
+          fdtget -p exynos7870-on7xelte-touch-panel.dtb $P | tee panel-props.txt
+          grep -q reset-gpios panel-props.txt && grep -q vsp-supply panel-props.txt
+
+      - name: Package
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p ~/w/out
+          cd ~/w
+          cp build.log config-touch.txt out/ 2>/dev/null || true
+          (cd linux-$KBASE && git diff > ../out/touch.diff) 2>/dev/null || true
+          cd out && sha256sum * > SHA256SUMS && ls -la
+          mkdir -p "$GITHUB_WORKSPACE/artifact" && cp -r . "$GITHUB_WORKSPACE/artifact/"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: touch-7.3.4
+          path: artifact/
+          retention-days: 3
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "### dev-touch: Linux $KVER + pmaports@${PMAPORTS_COMMIT:0:8} + $PATCHDIR"
+            echo '```'; cat ~/w/config-touch.txt 2>/dev/null; echo '```'
+            echo "DTBs: $(ls ~/w/out/*.dtb 2>/dev/null | xargs -n1 basename 2>/dev/null | tr '\n' ' ')"
+          } >> "$GITHUB_STEP_SUMMARY"
