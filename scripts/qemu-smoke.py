@@ -10,7 +10,7 @@ saved over QMP and searched for the marker that only a running /init can create
 (the init binary stores it reversed and builds it at run time, then writes it to
 /dev/kmsg). Kernel log lines found in the RAM image are printed for diagnosis.
 """
-import json, os, re, socket, subprocess, sys, time
+import json, os, re, select, socket, subprocess, sys, time
 
 image, initrd, timeout, console = sys.argv[1], sys.argv[2], int(sys.argv[3]), sys.argv[4] == "1"
 MARKER = b"J7CI-INIT-REACHED"
@@ -32,26 +32,39 @@ for _ in range(100):
         s = socket.socket(socket.AF_UNIX); s.connect(sock_path); break
     except OSError:
         time.sleep(0.1)
-f = s.makefile("rwb")
+buf = b""
+
+def readline(wait=None):
+    """one QMP line, or b"" if nothing arrives within `wait` seconds (None = block)"""
+    global buf
+    while b"\n" not in buf:
+        r, _, _ = select.select([s], [], [], wait)
+        if not r:
+            return b""
+        d = s.recv(65536)
+        if not d:
+            return b""
+        buf += d
+    line, buf = buf.split(b"\n", 1)
+    return line
 
 def send(execute, **args):
-    f.write(json.dumps({"execute": execute, "arguments": args}).encode() + b"\n"); f.flush()
+    s.sendall(json.dumps({"execute": execute, "arguments": args}).encode() + b"\n")
     while True:
-        m = json.loads(f.readline())
+        line = readline(60)
+        if not line:
+            return None
+        m = json.loads(line)
         if "event" in m:
             events.append(m); continue
         return m
 
 events = []
-json.loads(f.readline())  # greeting
+json.loads(readline())  # greeting
 send("qmp_capabilities")
-s.settimeout(1.0)
 reason = None
 while time.time() - t0 < timeout and reason is None:
-    try:
-        line = f.readline()
-    except (socket.timeout, TimeoutError):
-        line = b""
+    line = readline(1.0)
     if line:
         m = json.loads(line)
         events.append(m)
@@ -61,7 +74,6 @@ while time.time() - t0 < timeout and reason is None:
         reason = reason or f"qemu exited rc={q.returncode}"
         break
 dt = time.time() - t0
-s.settimeout(None)
 if q.poll() is None:
     send("stop")
     send("pmemsave", val=0x40000000, size=MEM_MB << 20, filename=os.path.abspath("mem.bin"))
