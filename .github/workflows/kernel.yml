@@ -255,9 +255,9 @@ jobs:
           cd out && sha256sum * > SHA256SUMS; ls -la
           w=$(grep -c -E 'warning|error|failed' dtbs_check.txt 2>/dev/null || true)
           {
-            echo "### dtb \`$BUILD\`: \`$(sed -n 's/^commit: //p' ../source.txt | cut -c1-12)\` $REF, DTBs built in ${DTB_T:-?}s, dtbs_check: ${w:-n/a} lines with warnings"
+            echo "### dtb \`$BUILD\`: \`$(sed -n 's/^commit: //p' ../source.txt | cut -c1-12)\` $REF, DTBs built in ${DTB_T:-?}s, dtbs_check: ${w:-n/a} warning/error lines"
             echo "<details><summary>dtbs_check output</summary>"; echo; echo '```'
-            grep -E 'warning|error|failed' dtbs_check.txt 2>/dev/null | sed "s#^$PWD/../src/##" | head -200
+            grep -E 'warning|error|failed' dtbs_check.txt 2>/dev/null | head -200 || true
             echo '```'; echo "</details>"
           } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
@@ -274,6 +274,7 @@ jobs:
           gh release create "$tag" out/* -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$tag" --notes-file source.txt
 
   stock-module:
+    needs: setup
     if: inputs.mode == 'stock-module'
     runs-on: ubuntu-latest
     timeout-minutes: 180
