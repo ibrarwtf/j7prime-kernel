@@ -34,6 +34,9 @@ on:
         description: "kernel mode: QEMU virt boot smoke test"
         type: boolean
         default: true
+      runner:
+        description: "stable mode: runner label (GitHub: ubuntu-24.04-arm | Namespace: nscloud-ubuntu-24.04-arm64-8x16)"
+        default: "nscloud-ubuntu-24.04-arm64-8x16"
       release:
         description: "also publish a GitHub release <build>-<run_number> with the artifacts"
         type: boolean
@@ -328,7 +331,7 @@ jobs:
   stable:
     needs: setup
     if: inputs.mode == 'stable'
-    runs-on: ubuntu-24.04-arm
+    runs-on: ${{ inputs.runner || 'ubuntu-24.04-arm' }}
     timeout-minutes: 345
     strategy:
       fail-fast: false
