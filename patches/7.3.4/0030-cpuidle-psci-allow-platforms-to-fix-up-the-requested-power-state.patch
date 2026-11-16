@@ -1,0 +1,88 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] cpuidle: psci: allow platforms to fix up the requested power state
+
+In platform-coordinated mode the PSCI firmware is supposed to accept a
+power state for a higher affinity level from every CPU and power the
+level down once its last CPU enters. The Exynos7870 firmware does not:
+it rejects a cluster power-down request unless the calling CPU is the
+last one powered in the cluster, and returns at once without even
+powering the core down. The platform also has to enable the PMU CPU
+sequencer itself for the cluster to be powered off.
+
+Add an optional platform callback that runs before an idle state is
+entered and returns the power state to request, so that platform code
+can do the last-man coordination and fall back to a core-only state.
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit d9a4d58ceeab.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: applied with offsets (next to the 0012 module parameter).
+
+ drivers/cpuidle/cpuidle-psci.c | 28 +++++++++++++++++++++++++---
+ include/linux/psci.h | 6 ++++++
+ 2 files changed, 31 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/cpuidle/cpuidle-psci.c b/drivers/cpuidle/cpuidle-psci.c
+--- a/drivers/cpuidle/cpuidle-psci.c
++++ b/drivers/cpuidle/cpuidle-psci.c
+@@ -45,6 +45,23 @@
+ static DEFINE_PER_CPU_READ_MOSTLY(struct psci_cpuidle_data, psci_cpuidle_data);
+ static DEFINE_PER_CPU(struct psci_cpuidle_domain_state, psci_domain_state);
+ static bool psci_cpuidle_use_syscore;
++static u32 (*psci_cpuidle_state_fixup)(u32 state) __read_mostly;
++
++/**
++ * psci_cpuidle_set_state_fixup() - Set a platform power state fixup
++ * @fixup: Callback, or NULL to remove it
++ *
++ * Some platform-coordinated firmware rejects a power state for a higher
++ * affinity level unless the calling CPU is the last one running at that
++ * level, instead of coordinating the request itself. @fixup runs on the
++ * entering CPU with interrupts disabled, before CPU PM notifiers are called,
++ * for every idle state other than WFI, and returns the power state to request
++ * instead of the one from the device tree.
++ */
++void psci_cpuidle_set_state_fixup(u32 (*fixup)(u32 state))
++{
++	WRITE_ONCE(psci_cpuidle_state_fixup, fixup);
++}
+ 
+ static bool exynos7870_deep_idle;
+ module_param(exynos7870_deep_idle, bool, 0444);
+@@ -223,9 +240,14 @@
+ static __cpuidle int psci_enter_idle_state(struct cpuidle_device *dev,
+ 					   struct cpuidle_driver *drv, int idx)
+ {
+-	u32 *state = __this_cpu_read(psci_cpuidle_data.psci_states);
+-
+-	return CPU_PM_CPU_IDLE_ENTER_PARAM_RCU(psci_cpu_suspend_enter, idx, state[idx]);
++	u32 *states = __this_cpu_read(psci_cpuidle_data.psci_states);
++	u32 (*fixup)(u32 state) = READ_ONCE(psci_cpuidle_state_fixup);
++	u32 state = states[idx];
++
++	if (idx && fixup)
++		state = fixup(state);
++
++	return CPU_PM_CPU_IDLE_ENTER_PARAM_RCU(psci_cpu_suspend_enter, idx, state);
+ }
+ 
+ static const struct of_device_id psci_idle_state_match[] = {
+diff --git a/include/linux/psci.h b/include/linux/psci.h
+--- a/include/linux/psci.h
++++ b/include/linux/psci.h
+@@ -59,4 +59,10 @@
+ static inline bool acpi_psci_use_hvc(void) {return false; }
+ #endif
+ 
++#if defined(CONFIG_ARM_PSCI_CPUIDLE)
++void psci_cpuidle_set_state_fixup(u32 (*fixup)(u32 state));
++#else
++static inline void psci_cpuidle_set_state_fixup(u32 (*fixup)(u32 state)) { }
++#endif
++
+ #endif /* __LINUX_PSCI_H */
+-- 
+2.47.0

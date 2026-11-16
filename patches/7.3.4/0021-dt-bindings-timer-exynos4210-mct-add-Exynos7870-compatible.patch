@@ -1,0 +1,38 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] dt-bindings: timer: exynos4210-mct: add Exynos7870 compatible
+
+Add samsung,exynos7870-mct, with the exynos4210-mct fallback and the
+12 interrupts (4 global, 8 local) of the other recent SoCs.
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit 6fe33a637e34.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: applied unchanged.
+
+ Documentation/devicetree/bindings/timer/samsung,exynos4210-mct.yaml | 2 ++
+ 1 file changed, 2 insertions(+), 0 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/timer/samsung,exynos4210-mct.yaml b/Documentation/devicetree/bindings/timer/samsung,exynos4210-mct.yaml
+--- a/Documentation/devicetree/bindings/timer/samsung,exynos4210-mct.yaml
++++ b/Documentation/devicetree/bindings/timer/samsung,exynos4210-mct.yaml
+@@ -34,6 +34,7 @@
+               - samsung,exynos5260-mct
+               - samsung,exynos5420-mct
+               - samsung,exynos5433-mct
++              - samsung,exynos7870-mct
+               - samsung,exynos850-mct
+               - samsung,exynos8895-mct
+               - samsung,exynos990-mct
+@@ -138,6 +139,7 @@
+               - samsung,exynos5260-mct
+               - samsung,exynos5420-mct
+               - samsung,exynos5433-mct
++              - samsung,exynos7870-mct
+               - samsung,exynos850-mct
+               - samsung,exynos8895-mct
+               - samsung,exynos990-mct
+-- 
+2.47.0

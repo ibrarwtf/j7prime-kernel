@@ -1,0 +1,84 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] arm64: dts: exynos7870-on7xelte: add the cluster power-down state
+
+Add a cluster power-down idle state (PSCI 0x1010000) for the non-boot
+cluster (cpu4-7). The firmware takes a cluster request only from the
+last CPU of the cluster, so the Exynos7870 PMU code grants it only then
+and requests the core state otherwise. 3 ms minimum residency = the
+vendor's cluster residency; latencies = cpu-sleep's plus room for the
+L2 flush. Like cpu-sleep it is registered switched off (patch 0012)
+and enabled per CPU at run time (cpuN/cpuidle/state2/disable).
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit 540051cbeeaa
+(state moved to the board DT next to our cpu-sleep, our longer latencies).
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    Port: rewritten for the board DT of 0013.
+
+ arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts | 26 ++++++++++++++++++++++----
+ 1 file changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -48,6 +48,24 @@
+ 				entry-latency-us = <100>;
+ 				exit-latency-us = <500>;
+ 				min-residency-us = <2000>;
++			};
++
++			/*
++			 * Cluster power-down of the non-boot cluster (cpu4-7).
++			 * The firmware takes it only from the last CPU of the
++			 * cluster; the Exynos7870 PMU code grants the request
++			 * only then and asks for cpu-sleep otherwise. 3 ms is
++			 * the vendor's cluster residency; the latencies are
++			 * those of cpu-sleep plus room for the L2 flush.
++			 * Registered switched off like cpu-sleep.
++			 */
++			cluster_sleep: cluster-sleep {
++				compatible = "arm,idle-state";
++				arm,psci-suspend-param = <0x1010000>;
++				local-timer-stop;
++				entry-latency-us = <200>;
++				exit-latency-us = <800>;
++				min-residency-us = <3000>;
+ 			};
+ 		};
+ 	};
+@@ -409,25 +427,25 @@
+ };
+ 
+ &cpu4 {
+-	cpu-idle-states = <&cpu_sleep>;
++	cpu-idle-states = <&cpu_sleep>, <&cluster_sleep>;
+ 	cpu-supply = <&vdd_buck1>;
+ 	operating-points-v2 = <&cpucl1_opp_table>;
+ };
+ 
+ &cpu5 {
+-	cpu-idle-states = <&cpu_sleep>;
++	cpu-idle-states = <&cpu_sleep>, <&cluster_sleep>;
+ 	cpu-supply = <&vdd_buck1>;
+ 	operating-points-v2 = <&cpucl1_opp_table>;
+ };
+ 
+ &cpu6 {
+-	cpu-idle-states = <&cpu_sleep>;
++	cpu-idle-states = <&cpu_sleep>, <&cluster_sleep>;
+ 	cpu-supply = <&vdd_buck1>;
+ 	operating-points-v2 = <&cpucl1_opp_table>;
+ };
+ 
+ &cpu7 {
+-	cpu-idle-states = <&cpu_sleep>;
++	cpu-idle-states = <&cpu_sleep>, <&cluster_sleep>;
+ 	cpu-supply = <&vdd_buck1>;
+ 	operating-points-v2 = <&cpucl1_opp_table>;
+ };
+-- 
+2.47.0

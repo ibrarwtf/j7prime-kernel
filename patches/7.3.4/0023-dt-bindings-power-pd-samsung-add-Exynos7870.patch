@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] dt-bindings: power: pd-samsung: add Exynos7870
+
+The Exynos7870 power domains have the Exynos5433 register layout
+(CONFIGURATION at +0, STATUS at +4, local power value 0xf; vendor
+pmucal S5E7870: G3D 0x4000, DISPAUD 0x4020, ISP 0x4040, MFCMSCL 0x4060
+from the PMU base).
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit 6a473c8d6592.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: applied unchanged.
+
+ Documentation/devicetree/bindings/power/pd-samsung.yaml | 10 +++++++---
+ 1 file changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/power/pd-samsung.yaml b/Documentation/devicetree/bindings/power/pd-samsung.yaml
+--- a/Documentation/devicetree/bindings/power/pd-samsung.yaml
++++ b/Documentation/devicetree/bindings/power/pd-samsung.yaml
+@@ -18,9 +18,13 @@
+ 
+ properties:
+   compatible:
+-    enum:
+-      - samsung,exynos4210-pd
+-      - samsung,exynos5433-pd
++    oneOf:
++      - enum:
++          - samsung,exynos4210-pd
++          - samsung,exynos5433-pd
++      - items:
++          - const: samsung,exynos7870-pd
++          - const: samsung,exynos5433-pd
+ 
+   reg:
+     maxItems: 1
+-- 
+2.47.0

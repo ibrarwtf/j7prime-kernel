@@ -1,0 +1,76 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] clk: samsung: exynos7870: register CMU_MIF and CMU_PERI early
+
+The MCT timer is probed before platform drivers and needs its clock
+from CMU_PERI, whose parent clocks come from CMU_MIF. Register both
+units with CLK_OF_DECLARE, as Exynos850 does for its CMU_TOP and
+CMU_PERI, and drop them from the platform driver match table.
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit 3b829658e810.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: same change; context differs (CMU_CPUCL0/1 from 0007 stay platform devices).
+
+ drivers/clk/samsung/clk-exynos7870.c | 24 ++++++++++++++++++------
+ 1 file changed, 18 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/clk/samsung/clk-exynos7870.c b/drivers/clk/samsung/clk-exynos7870.c
+--- a/drivers/clk/samsung/clk-exynos7870.c
++++ b/drivers/clk/samsung/clk-exynos7870.c
+@@ -754,6 +754,15 @@
+ 	.nr_clk_ids		= MIF_NR_CLK,
+ };
+ 
++static void __init exynos7870_cmu_mif_init(struct device_node *np)
++{
++	exynos_arm64_register_cmu(NULL, np, &mif_cmu_info);
++}
++
++/* Register CMU_MIF early, as CMU_PERI needs it */
++CLK_OF_DECLARE(exynos7870_cmu_mif, "samsung,exynos7870-cmu-mif",
++	       exynos7870_cmu_mif_init);
++
+ /*
+  * Register offsets for CMU_CPUCL0 (0x10900000)
+  */
+@@ -2161,6 +2170,15 @@
+ 	.nr_clk_ids		= PERI_NR_CLK,
+ };
+ 
++static void __init exynos7870_cmu_peri_init(struct device_node *np)
++{
++	exynos_arm64_register_cmu(NULL, np, &peri_cmu_info);
++}
++
++/* Register CMU_PERI early, as it's needed for MCT timer */
++CLK_OF_DECLARE(exynos7870_cmu_peri, "samsung,exynos7870-cmu-peri",
++	       exynos7870_cmu_peri_init);
++
+ static int __init exynos7870_cmu_probe(struct platform_device *pdev)
+ {
+ 	const struct samsung_cmu_info *info;
+@@ -2174,9 +2192,6 @@
+ 
+ static const struct of_device_id exynos7870_cmu_of_match[] = {
+ 	{
+-		.compatible = "samsung,exynos7870-cmu-mif",
+-		.data = &mif_cmu_info,
+-	}, {
+ 		.compatible = "samsung,exynos7870-cmu-cpucl0",
+ 		.data = &cpucl0_cmu_info,
+ 	}, {
+@@ -2198,9 +2213,6 @@
+ 		.compatible = "samsung,exynos7870-cmu-mfcmscl",
+ 		.data = &mfcmscl_cmu_info,
+ 	}, {
+-		.compatible = "samsung,exynos7870-cmu-peri",
+-		.data = &peri_cmu_info,
+-	}, {
+ 	},
+ };
+ 
+-- 
+2.47.0

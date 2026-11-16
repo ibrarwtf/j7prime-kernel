@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] arm64: dts: exynos7870-on7xelte: use the SD card-detect GPIO
+
+The SD slot is described with broken-cd, so the MMC core polls it every
+second, switching its two regulators on and off each time (about 100
+interrupts/s on the host plus PMIC i2c traffic, measured idle). gpa0-1
+is already in the slot's pinctrl group as an EINT pin; use it as the
+card-detect GPIO instead.
+
+The polarity is not verified (no card to test with): if it is wrong the
+slot sees a card when there is none and fails one initialisation; it
+does not poll either way.
+
+Origin: new in j7prime p3.
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    New.
+
+ arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts | 9 ++++++++-
+ 1 file changed, 8 insertions(+), 1 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -935,7 +935,14 @@
+ 	samsung,dw-mshc-ddr-timing = <1 2>;
+ 	sd-uhs-sdr50;
+ 	sd-uhs-sdr104;
+-	broken-cd;
++	/*
++	 * gpa0-1 is the card-detect line (already in pinctrl-0 as an EINT
++	 * pin). Without it the slot was polled every second (broken-cd),
++	 * power-cycling its regulators each time. Polarity not verified:
++	 * if inverted, the slot sees a card when there is none (one failed
++	 * init at boot, no polling either way).
++	 */
++	cd-gpios = <&gpa0 1 GPIO_ACTIVE_LOW>;
+ 	disable-wp;
+ 
+ 	status = "okay";
+-- 
+2.47.0

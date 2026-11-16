@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] arm64: dts: exynos7870: add the ISP power domain
+
+Describe the ISP power domain (PMU 0x4040) and put CMU_ISP in it, so the
+domain stays off until something needs its clocks.
+
+To skip on a test boot: pd_ignore_unused on the command line keeps every
+unused power domain on (genpd).
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit 5208351dde6f.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: power domain node and power-domains property only; the
+    assigned-clocks part (MIF CAM inputs to the lowest vendor level) is left out because our
+    clock binding header has no ID for ffac_mif_mux_media_pll_div2 (needs a binding change first).
+
+ arch/arm64/boot/dts/exynos/exynos7870.dtsi | 9 +++++++++
+ 1 file changed, 9 insertions(+), 0 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870.dtsi b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+--- a/arch/arm64/boot/dts/exynos/exynos7870.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+@@ -297,6 +297,14 @@
+ 			};
+ 		};
+ 
++		pd_isp: power-domain@10484040 {
++			compatible = "samsung,exynos7870-pd",
++				     "samsung,exynos5433-pd";
++			reg = <0x10484040 0x20>;
++			#power-domain-cells = <0>;
++			label = "isp";
++		};
++
+ 		gic: interrupt-controller@104e1000 {
+ 			compatible = "arm,cortex-a15-gic";
+ 			reg = <0x104e1000 0x1000>,
+@@ -830,6 +838,7 @@
+ 				 <&cmu_mif CLK_GOUT_MIF_CMU_ISP_CAM>,
+ 				 <&cmu_mif CLK_GOUT_MIF_CMU_ISP_ISP>,
+ 				 <&cmu_mif CLK_GOUT_MIF_CMU_ISP_VRA>;
++			power-domains = <&pd_isp>;
+ 		};
+ 
+ 		syscon_cam0: system-controller@144f1040 {
+-- 
+2.47.0

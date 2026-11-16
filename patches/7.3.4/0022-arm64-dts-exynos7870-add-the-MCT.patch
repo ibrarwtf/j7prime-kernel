@@ -1,0 +1,58 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] arm64: dts: exynos7870: add the MCT
+
+Add the Multi Core Timer (vendor DT: mct@101B0000, SPI 102-113). The
+architected timer stays clocksource, per-CPU tick and sched_clock (it
+has the higher rating); the MCT global comparator replaces bc_hrtimer
+as the broadcast device and the MCT local timers can serve as per-CPU
+wakeup devices, so a CPU in a power-down idle state no longer needs
+another CPU to stay awake holding the hrtimer broadcast.
+
+j7prime: with only bc_hrtimer, a lone idle CPU never entered cpu-sleep
+(-EBUSY from the broadcast) and one CPU always stayed in WFI, which
+also rules out any cluster power-down. To skip on a test boot: set this
+node's status to "disabled" in the DTB (fdtput).
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit a28a1d164c13.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: applied unchanged (offset only).
+
+ arch/arm64/boot/dts/exynos/exynos7870.dtsi | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+), 0 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870.dtsi b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+--- a/arch/arm64/boot/dts/exynos/exynos7870.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+@@ -189,6 +189,26 @@
+ 			status = "disabled";
+ 		};
+ 
++		timer@101b0000 {
++			compatible = "samsung,exynos7870-mct",
++				     "samsung,exynos4210-mct";
++			reg = <0x101b0000 0x800>;
++			interrupts = <GIC_SPI 102 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 103 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 104 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 105 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 106 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 107 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 108 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 109 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 110 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 111 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 112 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 113 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&oscclk>, <&cmu_peri CLK_GOUT_PERI_MCT_PCLK>;
++			clock-names = "fin_pll", "mct";
++		};
++
+ 		cmu_peri: clock-controller@101f0000 {
+ 			compatible = "samsung,exynos7870-cmu-peri";
+ 			reg = <0x101f0000 0x1000>;
+-- 
+2.47.0

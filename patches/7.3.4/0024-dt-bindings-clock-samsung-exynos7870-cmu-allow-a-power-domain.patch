@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] dt-bindings: clock: samsung,exynos7870-cmu: allow a power domain
+
+Clock units of blocks with their own power domain sit in that domain.
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit 4e3b737d308e.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: applied unchanged.
+
+ Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml | 3 +++
+ 1 file changed, 3 insertions(+), 0 deletions(-)
+
+diff --git a/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml b/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml
+--- a/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml
++++ b/Documentation/devicetree/bindings/clock/samsung,exynos7870-cmu.yaml
+@@ -44,6 +44,9 @@
+ 
+   "#clock-cells":
+     const: 1
++
++  power-domains:
++    maxItems: 1
+ 
+   reg:
+     maxItems: 1
+-- 
+2.47.0

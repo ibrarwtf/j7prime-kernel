@@ -1,0 +1,69 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] clk: samsung: exynos7870: let CMU_MFCMSCL power down
+
+Nothing uses the MFC (video codec) and M2M scaler block, but four of
+its clocks are critical, which would keep its power domain on for good
+once CMU_MFCMSCL sits in it. Drop those flags, and keep the two input
+clocks from CMU_MIF running, as for the ISP domain (the vendor kernel
+ungates a domain's inputs before powering it down).
+
+Origin: new in j7prime p3, modelled on Martin Štrobl's ISP change (32142e0f36e9 in github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0)).
+Assisted-by: Claude Opus 5.5
+---
+
+Notes:
+    New. Untested: that MFCMSCL behaves like ISP is an assumption (same vendor pmucal sequence family).
+
+ drivers/clk/samsung/clk-exynos7870.c | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/clk/samsung/clk-exynos7870.c b/drivers/clk/samsung/clk-exynos7870.c
+--- a/drivers/clk/samsung/clk-exynos7870.c
++++ b/drivers/clk/samsung/clk-exynos7870.c
+@@ -569,12 +569,14 @@
+ 	GATE(CLK_GOUT_MIF_CMU_ISP_VRA, "gout_mif_cmu_isp_vra",
+ 	     "dout_mif_cmu_isp_vra", CLK_CON_GAT_MIF_CMU_ISP_VRA, 0,
+ 	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
++	/* The MFCMSCL power domain needs its input clocks to power down */
+ 	GATE(CLK_GOUT_MIF_CMU_MFCMSCL_MFC, "gout_mif_cmu_mfcmscl_mfc",
+ 	     "dout_mif_cmu_mfcmscl_mfc", CLK_CON_GAT_MIF_CMU_MFCMSCL_MFC, 0,
+-	     CLK_SET_RATE_PARENT, 0),
++	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
++	/* The MFCMSCL power domain needs its input clocks to power down */
+ 	GATE(CLK_GOUT_MIF_CMU_MFCMSCL_MSCL, "gout_mif_cmu_mfcmscl_mscl",
+ 	     "dout_mif_cmu_mfcmscl_mscl", CLK_CON_GAT_MIF_CMU_MFCMSCL_MSCL, 0,
+-	     CLK_SET_RATE_PARENT, 0),
++	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
+ 	GATE(CLK_GOUT_MIF_CMU_PERI_BUS, "gout_mif_cmu_peri_bus",
+ 	     "dout_mif_cmu_peri_bus", CLK_CON_GAT_MIF_CMU_PERI_BUS, 0,
+ 	     CLK_SET_RATE_PARENT, 0),
+@@ -1882,7 +1884,7 @@
+ 	     CLK_SET_RATE_PARENT, 0),
+ 	GATE(CLK_GOUT_MFCMSCL_MSCL, "gout_mfcmscl_mscl",
+ 	     "gout_mfcmscl_mux_mscl_user", CLK_CON_GAT_MFCMSCL_MSCL, 0,
+-	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
++	     CLK_SET_RATE_PARENT, 0),
+ 	GATE(CLK_GOUT_MFCMSCL_MSCL_BI, "gout_mfcmscl_mscl_bi",
+ 	     "gout_mfcmscl_mscl_d", CLK_CON_GAT_MFCMSCL_MSCL_BI, 4,
+ 	     CLK_SET_RATE_PARENT, 0),
+@@ -1897,13 +1899,13 @@
+ 	     CLK_SET_RATE_PARENT, 0),
+ 	GATE(CLK_GOUT_MFCMSCL_MSCL_PPMU, "gout_mfcmscl_mscl_ppmu",
+ 	     "gout_mfcmscl_mux_mscl_user", CLK_CON_GAT_MFCMSCL_MSCL_PPMU, 5,
+-	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
++	     CLK_SET_RATE_PARENT, 0),
+ 	GATE(CLK_GOUT_MFCMSCL_MUX_MFC_USER, "gout_mfcmscl_mux_mfc_user",
+ 	     "mout_mfcmscl_mfc_user", CLK_CON_GAT_MFCMSCL_MUX_MFC_USER, 21,
+-	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
++	     CLK_SET_RATE_PARENT, 0),
+ 	GATE(CLK_GOUT_MFCMSCL_MUX_MSCL_USER, "gout_mfcmscl_mux_mscl_user",
+ 	     "mout_mfcmscl_mscl_user", CLK_CON_GAT_MFCMSCL_MUX_MSCL_USER, 21,
+-	     CLK_IS_CRITICAL | CLK_SET_RATE_PARENT, 0),
++	     CLK_SET_RATE_PARENT, 0),
+ };
+ 
+ static const struct samsung_cmu_info mfcmscl_cmu_info __initconst = {
+-- 
+2.47.0

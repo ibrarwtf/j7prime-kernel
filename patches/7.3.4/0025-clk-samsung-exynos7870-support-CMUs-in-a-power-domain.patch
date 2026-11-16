@@ -1,0 +1,77 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: j7prime p3 <p3@j7prime.invalid>
+Date: Tue, 17 Nov 2026 01:00:00 +0530
+Subject: [PATCH] clk: samsung: exynos7870: support CMUs in a power domain
+
+A clock unit inside a power domain loses its registers when the domain
+powers down, and must not be accessed while it is off.
+
+When a CMU node has a power domain, register it with PM support: its
+clocks then resume the CMU (and its domain) through runtime PM, its
+registers are saved and restored around power-downs, and it follows
+runtime PM over system sleep. CMUs without a power-domains property
+behave as before.
+
+Origin: Martin Štrobl, github.com/a3y17lte-mainline/kernel_samsung_exynos7870 (branch lineage-24.0) commit 91dacdf7e831.
+---
+
+Notes:
+    Port to v7.3.4 + j7prime 0001-0017: applied with offsets.
+
+ drivers/clk/samsung/clk-exynos7870.c | 24 ++++++++++++++++++++++++
+ 1 file changed, 24 insertions(+), 0 deletions(-)
+
+diff --git a/drivers/clk/samsung/clk-exynos7870.c b/drivers/clk/samsung/clk-exynos7870.c
+--- a/drivers/clk/samsung/clk-exynos7870.c
++++ b/drivers/clk/samsung/clk-exynos7870.c
+@@ -9,6 +9,7 @@
+ #include <linux/clk-provider.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/pm_runtime.h>
+ 
+ #include <dt-bindings/clock/samsung,exynos7870-cmu.h>
+ 
+@@ -2179,10 +2180,32 @@
+ CLK_OF_DECLARE(exynos7870_cmu_peri, "samsung,exynos7870-cmu-peri",
+ 	       exynos7870_cmu_peri_init);
+ 
++/* Only the CMUs in a power domain have PM data; the others use syscore */
++static int exynos7870_cmu_runtime_suspend(struct device *dev)
++{
++	return dev_get_drvdata(dev) ? exynos_arm64_cmu_suspend(dev) : 0;
++}
++
++static int exynos7870_cmu_runtime_resume(struct device *dev)
++{
++	return dev_get_drvdata(dev) ? exynos_arm64_cmu_resume(dev) : 0;
++}
++
++static const struct dev_pm_ops exynos7870_cmu_pm_ops = {
++	RUNTIME_PM_OPS(exynos7870_cmu_runtime_suspend,
++		       exynos7870_cmu_runtime_resume, NULL)
++	NOIRQ_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
++				  pm_runtime_force_resume)
++};
++
+ static int __init exynos7870_cmu_probe(struct platform_device *pdev)
+ {
+ 	const struct samsung_cmu_info *info;
+ 	struct device *dev = &pdev->dev;
++
++	/* A CMU in a power domain must only be accessed while it is on */
++	if (of_property_present(dev->of_node, "power-domains"))
++		return exynos_arm64_register_cmu_pm(pdev, true);
+ 
+ 	info = of_device_get_match_data(dev);
+ 	exynos_arm64_register_cmu(dev, dev->of_node, info);
+@@ -2221,6 +2244,7 @@
+ 		.name = "exynos7870-cmu",
+ 		.of_match_table = exynos7870_cmu_of_match,
+ 		.suppress_bind_attrs = true,
++		.pm = &exynos7870_cmu_pm_ops,
+ 	},
+ 	.probe = exynos7870_cmu_probe,
+ };
+-- 
+2.47.0
