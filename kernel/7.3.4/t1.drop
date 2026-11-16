@@ -113,6 +113,9 @@
 # CONFIG_BCM2835_VCHIQ is not set
 # CONFIG_BCM2835_WDT is not set
 # CONFIG_BLK_DEV_NVME is not set
+# CONFIG_BRCMFMAC_PCIE is not set
+# CONFIG_BRCMFMAC_PROTO_MSGBUF is not set
+# CONFIG_BRCMFMAC_USB is not set
 # CONFIG_CAN is not set
 # CONFIG_CHROME_PLATFORMS is not set
 # CONFIG_CROS_EC is not set
@@ -292,6 +295,7 @@
 # CONFIG_K3_RTI_WATCHDOG is not set
 # CONFIG_K3_THERMAL is not set
 # CONFIG_KVM is not set
+# CONFIG_MAC80211 is not set
 # CONFIG_MEDIATEK_MT6359_AUXADC is not set
 # CONFIG_MEDIATEK_MT6577_AUXADC is not set
 # CONFIG_MEDIATEK_WATCHDOG is not set
@@ -923,6 +927,7 @@
 # CONFIG_WLAN_VENDOR_ZYDAS is not set
 # CONFIG_WWAN is not set
 # CONFIG_XEN is not set
+# CONFIG_XFS_FS is not set
 # CONFIG_XILINX_AMS is not set
 # CONFIG_XILINX_AXI_EMAC is not set
 # CONFIG_XILINX_DMA is not set
