@@ -1,0 +1,23 @@
+# p1: pmaports linux-postmarketos-stable 7.3.4-r0 config-stable.aarch64 + only these changes.
+# Each line must survive olddefconfig (scripts/check-config.sh).
+CONFIG_LOCALVERSION="-j7p1"
+# early pstore console + pmsg (ramoops built in, 6.15 layout from the DT)
+CONFIG_PSTORE_RAM=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_PMSG=y
+# our own modules must load: no forced lockdown, no forced signatures
+# CONFIG_MODULE_SIG_FORCE is not set
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY is not set
+CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y
+CONFIG_PANIC_TIMEOUT=10
+# patches/7.3.4/0002 + 0003
+CONFIG_BATTERY_S2MU005_FG=m
+CONFIG_KEYBOARD_MIP4_TOUCHKEY=m
+# safety: no upstream S2MU005 function driver (charger, MUIC, LEDs, other FG).
+# The S2MU005 MFD part lives in MFD_SEC_CORE/MFD_SEC_I2C, which must stay =y for
+# the S2MPU05 PMIC; it only binds a "samsung,s2mu005-pmic" DT node, which our DT never has.
+# CONFIG_BATTERY_S2MU005 is not set
+# CONFIG_CHARGER_S2M is not set
+# CONFIG_EXTCON_S2M is not set
+# CONFIG_LEDS_S2M_RGB is not set
+# CONFIG_LEDS_S2M_FLASH is not set
