@@ -65,7 +65,7 @@ diff --git a/drivers/power/supply/s2mu005-lite.c b/drivers/power/supply/s2mu005-
 new file mode 100644
 --- /dev/null
 +++ b/drivers/power/supply/s2mu005-lite.c
-@@ -0,0 +1,991 @@
+@@ -0,0 +1,1011 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Samsung S2MU005 charger and RGB LED, standalone I2C client driver
@@ -198,8 +198,9 @@ new file mode 100644
 + * Rules, checked on every call:
 + *  - CHGR_CTRL0: only the operation mode field, and only mode 2 (charge) or
 + *    mode 1 (input on, charging off). Mode 1 only while STATUS0 reports VBUS,
-+ *    read again here: mode 1 written on battery reset the phone at the next
-+ *    plug-in. Mode 0 (input off) and the OTG modes are never written.
++ *    read again here and once more after the write: mode 1 written on battery
++ *    reset the phone at the next plug-in. Mode 0 (input off) and the OTG modes
++ *    are never written.
 + *  - CHGR_CTRL2 and CHGR_CTRL7: only the current field, inside the clamp range.
 + *  - The RGB LED registers.
 + *  - Nothing else: not the float voltage, MUIC, flash or interrupt registers.
@@ -249,7 +250,19 @@ new file mode 100644
 +		goto refuse;
 +	}
 +
-+	return regmap_write_bits(chip->regmap, reg, mask, val);
++	ret = regmap_write_bits(chip->regmap, reg, mask, val);
++	if (ret || reg != S2MU005_REG_CHGR_CTRL0 ||
++	    FIELD_GET(S2MU005_CHGR_OP_MODE, val) != S2MU005L_MODE_BUCK)
++		return ret;
++
++	/* The cable may have gone between the check and the write: undo at once. */
++	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
++	if (!ret && (status0 & S2MU005_CHGR_VBUS))
++		return 0;
++	dev_warn(chip->dev, "VBUS lost while stopping charging, switching back on\n");
++	regmap_write_bits(chip->regmap, reg, mask,
++			  FIELD_PREP(S2MU005_CHGR_OP_MODE, S2MU005L_MODE_CHARGE));
++	return -EAGAIN;
 +
 +refuse:
 +	dev_err(chip->dev, "refusing to write %#x (mask %#x) to register %#x\n",
@@ -308,6 +321,21 @@ new file mode 100644
 +{
 +	return FIELD_GET(S2MU005_CHGR_VF_VBAT, reg) * S2MU005L_FLOAT_STEP_UV +
 +	       S2MU005L_FLOAT_BASE_UV;
++}
++
++/* Clamp to the allowed range and round down to a register step. */
++static unsigned int s2mu005l_fit_input(unsigned int ua)
++{
++	ua = clamp_t(unsigned int, ua, S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_MAX_UA);
++	return rounddown(ua - S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_STEP_UA) +
++	       S2MU005L_INPUT_MIN_UA;
++}
++
++static unsigned int s2mu005l_fit_charge(unsigned int ua)
++{
++	ua = clamp_t(unsigned int, ua, S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_MAX_UA);
++	return rounddown(ua - S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_STEP_UA) +
++	       S2MU005L_CHARGE_MIN_UA;
 +}
 +
 +static int s2mu005l_set_input(struct s2mu005l *chip, unsigned int ua)
@@ -611,10 +639,7 @@ new file mode 100644
 +	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
 +		if (val->intval < 0)
 +			return -EINVAL;
-+		ua = clamp_t(unsigned int, val->intval,
-+			     S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_MAX_UA);
-+		ua = rounddown(ua - S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_STEP_UA) +
-+		     S2MU005L_INPUT_MIN_UA;
++		ua = s2mu005l_fit_input(val->intval);
 +		ret = s2mu005l_set_input(chip, ua);
 +		if (!ret)
 +			chip->input_ua = ua;
@@ -622,10 +647,7 @@ new file mode 100644
 +	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 +		if (val->intval < 0)
 +			return -EINVAL;
-+		ua = clamp_t(unsigned int, val->intval,
-+			     S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_MAX_UA);
-+		ua = rounddown(ua - S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_STEP_UA) +
-+		     S2MU005L_CHARGE_MIN_UA;
++		ua = s2mu005l_fit_charge(val->intval);
 +		ret = s2mu005l_set_charge(chip, ua);
 +		if (!ret)
 +			chip->charge_ua = ua;
@@ -988,10 +1010,8 @@ new file mode 100644
 +
 +	chip->end_pct = 100;
 +	if (auto_policy) {
-+		chip->input_ua = clamp_t(unsigned int, input_limit_ua,
-+					 S2MU005L_INPUT_MIN_UA, S2MU005L_INPUT_MAX_UA);
-+		chip->charge_ua = clamp_t(unsigned int, charge_current_ua,
-+					  S2MU005L_CHARGE_MIN_UA, S2MU005L_CHARGE_MAX_UA);
++		chip->input_ua = s2mu005l_fit_input(input_limit_ua);
++		chip->charge_ua = s2mu005l_fit_charge(charge_current_ua);
 +		if (start_threshold < end_threshold && end_threshold <= 100) {
 +			chip->start_pct = start_threshold;
 +			chip->end_pct = end_threshold;

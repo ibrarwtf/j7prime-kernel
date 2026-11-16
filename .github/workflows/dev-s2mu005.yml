@@ -11,6 +11,11 @@ on:
       - "patches/7.3.4-s2mu005-lite/**"
       - ".github/workflows/dev-s2mu005.yml"
   workflow_dispatch:
+    inputs:
+      full:
+        description: "also build Image + all modules, so the .ko is linked against a real Module.symvers (~25 min)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -113,11 +118,24 @@ jobs:
           set -euo pipefail
           cd src
           make LLVM=$LLVM -j"$(nproc)" -s modules_prepare
-          make LLVM=$LLVM W=1 drivers/power/supply/s2mu005-lite.ko 2>&1 | tee ../out/build-w1.log
-          if grep -E 'warning:|error:' ../out/build-w1.log | grep -v -E 'WARNING: modpost' ; then
+          # Single-module build: without vmlinux the exports are unknown, so modpost
+          # only warns about them (the compile itself is what is checked here).
+          make LLVM=$LLVM W=1 KBUILD_MODPOST_WARN=1 drivers/power/supply/s2mu005-lite.ko 2>&1 | tee ../out/build-w1.log
+          grep -q 'CC \[M\]  drivers/power/supply/s2mu005-lite.o' ../out/build-w1.log
+          if grep -E 'warning:|error:' ../out/build-w1.log; then
             echo "::error::compiler warnings in the driver build"; exit 1
           fi
           cp drivers/power/supply/s2mu005-lite.ko ../out/
+          modinfo drivers/power/supply/s2mu005-lite.ko | tee ../out/modinfo.txt
+
+      - name: Full build (optional, linked module)
+        if: inputs.full
+        run: |
+          set -euo pipefail
+          cd src
+          make LLVM=$LLVM -j"$(nproc)" -s Image modules 2>&1 | tail -20
+          cp drivers/power/supply/s2mu005-lite.ko ../out/
+          cp Module.symvers ../out/Module.symvers.txt
           modinfo drivers/power/supply/s2mu005-lite.ko | tee ../out/modinfo.txt
 
       - name: dt_binding_check
@@ -142,6 +160,7 @@ jobs:
       - name: Summary
         if: always()
         run: |
+          set +e
           {
             echo "### dev-s2mu005: linux $KVER, clang ${LLVM#-}"
             echo '```'
