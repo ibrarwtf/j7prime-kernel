@@ -1,4 +1,4 @@
-# p2: p1 (see p1.fragment) + Exynos 7870 TMU, cpufreq and cpuidle (patches/7.3.4/0004-0013).
+# p2: p1 (see p1.fragment) + Exynos 7870 TMU, cpufreq and cpuidle (patches/7.3.4/0004-0014).
 # Each line must survive olddefconfig (scripts/check-config.sh).
 CONFIG_LOCALVERSION="-j7p2"
 # early pstore console + pmsg (ramoops built in, 256 KiB layout from the DT patch 0001)

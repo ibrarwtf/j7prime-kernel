@@ -30,7 +30,7 @@ gh workflow run kernel.yml -f mode=stable -f builds=p1 -f build_dir=kernel/7.3.4
 ```
 
 ### Build p2 (7.3.4, `kernel/7.3.4/p2.fragment`)
-p1 + CPU temperature, frequency scaling and idle for the Exynos 7870 (`patches/7.3.4/0004`-`0013`): the TMU driver and node with one SoC thermal zone (passive 80/90 °C, hot 100 °C, critical 110 °C), CMU_CPUCL0/1 + the clk-cpu layout, cpufreq-dt with one OPP table per cluster on BUCK1 (546-1248 MHz; 1352/1482/1586 MHz present but disabled), the PSCI core power-down state registered switched off (`cpuidle_psci.exynos7870_deep_idle=1` registers it enabled), the PMU core-configuration notifier. The ramoops region is 256 KiB (dmesg 16 KiB + console 224 KiB + pmsg 16 KiB). `LOCALVERSION=-j7p2`.
+p1 + CPU temperature, frequency scaling and idle for the Exynos 7870 (`patches/7.3.4/0004`-`0014`): the TMU driver and node with one SoC thermal zone (passive 80/90 °C, hot 100 °C, critical 110 °C), CMU_CPUCL0/1 + the clk-cpu layout, cpufreq-dt with one OPP table per cluster on BUCK1 (546-1248 MHz; 1352/1482/1586 MHz present but disabled), the PSCI core power-down state registered switched off (`cpuidle_psci.exynos7870_deep_idle=1` registers it enabled), the PMU core-configuration notifier. Wi-Fi uses in-band SDIO interrupts (`0014`: the out-of-band host-wake line is stuck low on this board and fired ~18000 interrupts/s). The ramoops region is 256 KiB (dmesg 16 KiB + console 224 KiB + pmsg 16 KiB). `LOCALVERSION=-j7p2`.
 
 ```sh
 gh workflow run kernel.yml -f mode=stable -f builds=p2 -f build_dir=kernel/7.3.4

@@ -1,0 +1,41 @@
+Subject: arm64: dts: exynos7870-on7xelte: use in-band SDIO interrupts for Wi-Fi
+
+The BCM43430 host-wake line (gpa2-2) reads low all the time on the
+SM-G610F: the pin has the reset pull-down and the chip never releases it.
+With the upstream "interrupts = <2 IRQ_TYPE_LEVEL_LOW>" the out-of-band
+interrupt fires about 18000 times per second; every time brcmfmac reads
+an empty intstatus over SDIO (one dw-mci interrupt each), which keeps a
+kworker about 40 % busy and adds ~35000 function-call IPIs per second.
+Seen identically on 6.15 (PIO) and 7.3.4 (IDMAC). With
+IRQ_TYPE_LEVEL_HIGH the firmware does not come up (dongle not
+responding, -110).
+
+Drop the out-of-band interrupt so brcmfmac uses in-band SDIO interrupts
+(mmc1 already has cap-sdio-irq). Measured on 7.3.4: mmc1 27
+interrupts/s, total 9000/s instead of 70000/s, context switches
+4700/s instead of 70000/s, Wi-Fi associated, 0 % ping loss.
+Out-of-band wake is only needed for system suspend, which this phone
+does not use.
+
+Against: linux v7.3.4 + 0001-0013. License: GPL-2.0 (kernel DTS).
+
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -883,9 +883,14 @@
+ 	wifi@1 {
+ 		compatible = "brcm,bcm43430a1-fmac", "brcm,bcm4329-fmac";
+ 		reg = <0x1>;
+-		interrupt-names = "host-wake";
+-		interrupt-parent = <&gpa2>;
+-		interrupts = <2 IRQ_TYPE_LEVEL_LOW>;
++		/*
++		 * No out-of-band host-wake interrupt: on this board gpa2-2 reads
++		 * low all the time (pull-down, line never released), so the
++		 * level-low OOB interrupt fired ~18000 times/s with an empty
++		 * intstatus and kept a core ~40 % busy; level-high stops the
++		 * firmware from coming up at all. In-band SDIO interrupts
++		 * (cap-sdio-irq on mmc1) work and fire only on real events.
++		 */
+ 
+ 		reset-gpios = <&gpd3 6 GPIO_ACTIVE_LOW>;
+ 	};
