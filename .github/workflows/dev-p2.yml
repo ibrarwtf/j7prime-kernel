@@ -86,3 +86,17 @@ jobs:
           name: p2-734
           path: out/
           retention-days: 3
+
+      - name: Small DT + logs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: p2-734-dt
+          path: |
+            out/*.dtb
+            out/*.dts
+            out/*.log
+            out/*.txt
+            out/config
+            out/config.diff
+          retention-days: 3

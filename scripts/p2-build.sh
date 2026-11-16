@@ -43,8 +43,7 @@ for p in "$PATCHDIR"/*.patch; do
 	n=$((n + 1))
 done
 echo "applied $n p2 patches"
-# patch(1) leaves .rej/.orig only on failure, which already stopped the script
-[ -z "$(find . -name '*.rej' -o -name '*.orig' | head -1)" ]
+find . -name '*.rej' | grep . && { echo "::error::rejected hunks"; exit 1; }
 
 mk() { make -j"$(nproc)" ARCH=arm64 LLVM="${LLVM_SUFFIX:-1}" CC="ccache clang${LLVM_SUFFIX:-}" KBUILD_BUILD_VERSION="$((pkgrel + 1))-p2" "$@"; }
 
