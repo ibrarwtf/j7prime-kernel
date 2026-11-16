@@ -1,0 +1,52 @@
+# p2l: p2 + the standalone S2MU005 charger/RGB LED driver as a module (patches/7.3.4/0016-0017).
+# Same LOCALVERSION as p2: the .ko is meant to be loaded BY HAND on a running 7.3.4-j7p2.
+# No DT client node in any build, so nothing autoloads it.
+# Each line must survive olddefconfig (scripts/check-config.sh).
+CONFIG_LOCALVERSION="-j7p2"
+# early pstore console + pmsg (ramoops built in, 256 KiB layout from the DT patch 0001)
+CONFIG_PSTORE_RAM=y
+CONFIG_PSTORE_CONSOLE=y
+CONFIG_PSTORE_PMSG=y
+# our own modules must load: no forced lockdown, no forced signatures
+# CONFIG_MODULE_SIG_FORCE is not set
+# CONFIG_LOCK_DOWN_KERNEL_FORCE_INTEGRITY is not set
+CONFIG_LOCK_DOWN_KERNEL_FORCE_NONE=y
+CONFIG_PANIC_TIMEOUT=10
+# patches/7.3.4/0002 + 0003
+CONFIG_BATTERY_S2MU005_FG=m
+CONFIG_KEYBOARD_MIP4_TOUCHKEY=m
+# safety: no upstream S2MU005 function driver (charger, MUIC, LEDs, other FG).
+# The S2MU005 MFD part lives in MFD_SEC_CORE/MFD_SEC_I2C, which must stay =y for
+# the S2MPU05 PMIC; it only binds a "samsung,s2mu005-pmic" DT node, which our DT never has.
+# CONFIG_BATTERY_S2MU005 is not set
+# CONFIG_CHARGER_S2M is not set
+# CONFIG_EXTCON_S2M is not set
+# CONFIG_LEDS_S2M_RGB is not set
+# CONFIG_LEDS_S2M_FLASH is not set
+# repeated so the build fails if a future base config drops one of them.
+CONFIG_EXYNOS_THERMAL=y
+CONFIG_THERMAL_OF=y
+CONFIG_THERMAL_EMULATION=y
+CONFIG_CPU_THERMAL=y
+CONFIG_CPU_FREQ_THERMAL=y
+CONFIG_THERMAL_GOV_STEP_WISE=y
+CONFIG_CPU_FREQ=y
+CONFIG_CPU_FREQ_STAT=y
+CONFIG_CPUFREQ_DT=y
+CONFIG_CPUFREQ_DT_PLATDEV=y
+CONFIG_CPU_FREQ_GOV_PERFORMANCE=y
+CONFIG_CPU_FREQ_GOV_USERSPACE=y
+CONFIG_CPU_FREQ_GOV_SCHEDUTIL=y
+CONFIG_PM_OPP=y
+CONFIG_CPU_IDLE=y
+CONFIG_ARM_PSCI_CPUIDLE=y
+CONFIG_DT_IDLE_STATES=y
+CONFIG_EXYNOS_PMU=y
+CONFIG_COMMON_CLK_SAMSUNG=y
+CONFIG_EXYNOS_ARM64_COMMON_CLK=y
+CONFIG_MFD_SEC_CORE=y
+CONFIG_REGULATOR_S2MPS11=y
+# new vs the base: cooling-device transition counters in sysfs (test evidence)
+CONFIG_THERMAL_STATISTICS=y
+CONFIG_CHARGER_S2MU005_LITE=m
+CONFIG_LEDS_CLASS_MULTICOLOR=m
