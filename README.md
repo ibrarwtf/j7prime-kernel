@@ -29,6 +29,17 @@ Upstream v7.3.4 + the postmarketOS stable config with only: `LOCALVERSION=-j7p1`
 gh workflow run kernel.yml -f mode=stable -f builds=p1 -f build_dir=kernel/7.3.4
 ```
 
+### Build p2 (7.3.4, `kernel/7.3.4/p2.fragment`)
+p1 + CPU temperature, frequency scaling and idle for the Exynos 7870 (`patches/7.3.4/0004`-`0015`): the TMU driver and node with one SoC thermal zone (passive 80/90 °C, hot 100 °C, critical 110 °C), CMU_CPUCL0/1 + the clk-cpu layout, cpufreq-dt with one OPP table per cluster on BUCK1 (546-1248 MHz; 1352/1482/1586 MHz present but disabled), the PSCI core power-down state registered switched off (`cpuidle_psci.exynos7870_deep_idle=1` registers it enabled), the PMU core-configuration notifier. `0014` configures the Wi-Fi host-wake pin (EINT + pull-up; without it the out-of-band interrupt fired ~18000 times/s), `0015` keeps BUCK1 at or above the bootloader's 737.5 mV (shared rail: a cluster has no voltage request before its first frequency change). The ramoops region is 256 KiB (dmesg 16 KiB + console 224 KiB + pmsg 16 KiB). `LOCALVERSION=-j7p2`.
+
+```sh
+gh workflow run kernel.yml -f mode=stable -f builds=p2 -f build_dir=kernel/7.3.4
+```
+
+`p2l` (`kernel/7.3.4/p2l.fragment`) = p2 + the standalone S2MU005 charger/RGB LED driver (`0016`-`0017`) as a module, same release name, for loading by hand; no DT client node, so nothing loads it automatically. Not ready: the phone reset during its unbind in the first test.
+
+`patches/7.3.4-emmc-hs200/` (not applied by any build): eMMC HS200, 6x faster reads and clean in a 15-minute verify run, but three unexplained silent hangs on boots that carried it; parked.
+
 ## Running and downloading
 
 ```sh

@@ -1,0 +1,31 @@
+Subject: arm64: dts: exynos7870-on7xelte: run the eMMC at HS200
+
+The eMMC on the SM-G610F (Samsung AJNB3R, EXT_CSD rev 7, DEVICE_TYPE
+0x57: HS52, DDR52, HS200 and HS400 at 1.8 V) is left at 25 MHz legacy
+timing because mmc0 has no speed capabilities. Allow high speed and
+HS200 (1.8 V); dw_mmc-exynos tunes the sample phase.
+
+Measured on the phone (7.3.4, one-shot boots): sequential read 21.6 ->
+137.9 MB/s, 4k random read 3365 -> 6026 IOPS, direct write 17.9 -> 53.7
+MB/s; 256 MiB write + sha256 verify matches; 15 min fio random
+read/write with crc32c verify: 26 GiB read, 25 GiB written, no error,
+no mmc0/ext4 message. (cap-mmc-highspeed alone gives DDR52: 74.5 MB/s.)
+HS400 is not enabled (no vendor hs400 timing data).
+
+Against: linux v7.3.4 + 0001-0017. License: GPL-2.0 (kernel DTS).
+
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -862,6 +862,12 @@
+ 	samsung,dw-mshc-sdr-timing = <0 4>;
+ 	samsung,dw-mshc-ddr-timing = <2 4>;
+ 	non-removable;
++	/*
++	 * The AJNB3R eMMC (EXT_CSD DEVICE_TYPE 0x57) supports HS200 at 1.8 V;
++	 * without these the card stays at 25 MHz legacy timing.
++	 */
++	cap-mmc-highspeed;
++	mmc-hs200-1_8v;
+ 
+ 	status = "okay";
+ };

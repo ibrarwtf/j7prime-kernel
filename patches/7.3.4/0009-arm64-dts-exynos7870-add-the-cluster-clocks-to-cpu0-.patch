@@ -1,0 +1,46 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Alessandro Fontana <alessandro.fontana@pm.me>
+Date: Sat, 29 Aug 2026 15:57:50 +0000
+Subject: [PATCH 06/10] arm64: dts: exynos7870: add the cluster clocks to cpu0
+ and cpu4
+
+Wire the cluster clocks into the CPU nodes, as on Exynos850: cpu0 gets
+cluster0_clk from cmu_cpucl0 and cpu4 gets cluster1_clk from
+cmu_cpucl1. They are the policy CPUs of the two clusters, and
+cpufreq-dt uses the clock of the policy CPU.
+
+The supplies and the operating point tables are board specific and are
+left to the board device tree.
+
+Assisted-by: LLM
+Signed-off-by: Alessandro Fontana <alessandro.fontana@pm.me>
+---
+
+Notes:
+    Origin: https://github.com/alessandro-fontana/linux-exynos7870 commit 98416dcfc0e4 (branch gtaxlwifi/7.3). Port to v7.3.4: applied unchanged (git am, no fuzz).
+
+ arch/arm64/boot/dts/exynos/exynos7870.dtsi | 4 ++++
+ 1 file changed, 4 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/exynos/exynos7870.dtsi b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+index 0f662e5..859db6b 100644
+--- a/arch/arm64/boot/dts/exynos/exynos7870.dtsi
++++ b/arch/arm64/boot/dts/exynos/exynos7870.dtsi
+@@ -74,6 +74,8 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x0>;
+ 			enable-method = "psci";
++			clocks = <&cmu_cpucl0 CLK_CLUSTER0_SCLK>;
++			clock-names = "cluster0_clk";
+ 		};
+ 
+ 		cpu1: cpu@1 {
+@@ -102,6 +104,8 @@
+ 			compatible = "arm,cortex-a53";
+ 			reg = <0x100>;
+ 			enable-method = "psci";
++			clocks = <&cmu_cpucl1 CLK_CLUSTER1_SCLK>;
++			clock-names = "cluster1_clk";
+ 		};
+ 
+ 		cpu5: cpu@101 {
