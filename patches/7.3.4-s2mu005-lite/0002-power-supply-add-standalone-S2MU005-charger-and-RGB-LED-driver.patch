@@ -65,7 +65,7 @@ diff --git a/drivers/power/supply/s2mu005-lite.c b/drivers/power/supply/s2mu005-
 new file mode 100644
 --- /dev/null
 +++ b/drivers/power/supply/s2mu005-lite.c
-@@ -0,0 +1,1011 @@
+@@ -0,0 +1,1036 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Samsung S2MU005 charger and RGB LED, standalone I2C client driver
@@ -192,6 +192,18 @@ new file mode 100644
 +	u8 stay_lo;
 +};
 +
++/* 1 if STATUS0 reports VBUS, 0 if not, negative on a bus error. */
++static int s2mu005l_vbus(struct s2mu005l *chip)
++{
++	unsigned int status0;
++	int ret;
++
++	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
++	if (ret)
++		return ret;
++	return !!(status0 & S2MU005_CHGR_VBUS);
++}
++
 +/*
 + * s2mu005l_write - the only function that writes to the chip
 + *
@@ -201,14 +213,15 @@ new file mode 100644
 + *    read again here and once more after the write: mode 1 written on battery
 + *    reset the phone at the next plug-in. Mode 0 (input off) and the OTG modes
 + *    are never written.
-+ *  - CHGR_CTRL2 and CHGR_CTRL7: only the current field, inside the clamp range.
++ *  - CHGR_CTRL2 and CHGR_CTRL7: only the current field, inside the clamp range,
++ *    and only while VBUS is present (as the proven user-space policy did).
 + *  - The RGB LED registers.
 + *  - Nothing else: not the float voltage, MUIC, flash or interrupt registers.
 + */
 +static int s2mu005l_write(struct s2mu005l *chip, unsigned int reg,
 +			  unsigned int mask, unsigned int val)
 +{
-+	unsigned int status0, code;
++	unsigned int code;
 +	int ret;
 +
 +	lockdep_assert_held(&chip->lock);
@@ -221,10 +234,10 @@ new file mode 100644
 +		case S2MU005L_MODE_CHARGE:
 +			break;
 +		case S2MU005L_MODE_BUCK:
-+			ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
-+			if (ret)
++			ret = s2mu005l_vbus(chip);
++			if (ret < 0)
 +				return ret;
-+			if (!(status0 & S2MU005_CHGR_VBUS)) {
++			if (!ret) {
 +				dev_warn(chip->dev, "refusing to stop charging without VBUS\n");
 +				return -EPERM;
 +			}
@@ -237,12 +250,18 @@ new file mode 100644
 +		code = FIELD_GET(S2MU005_CHGR_IN_CURR_LIM, val);
 +		if (mask != S2MU005_CHGR_IN_CURR_LIM || code > S2MU005L_INPUT_MAX_CODE)
 +			goto refuse;
++		ret = s2mu005l_vbus(chip);
++		if (ret <= 0)
++			return ret ?: -EPERM;
 +		break;
 +	case S2MU005_REG_CHGR_CTRL7:
 +		code = FIELD_GET(S2MU005_CHGR_FAST_CHG_CURR, val);
 +		if (mask != S2MU005_CHGR_FAST_CHG_CURR ||
 +		    code < S2MU005L_CHARGE_MIN_CODE || code > S2MU005L_CHARGE_MAX_CODE)
 +			goto refuse;
++		ret = s2mu005l_vbus(chip);
++		if (ret <= 0)
++			return ret ?: -EPERM;
 +		break;
 +	case S2MU005_REG_RGB_EN ... S2MU005_REG_RGB_CH2_STAY:
 +		break;
@@ -256,8 +275,7 @@ new file mode 100644
 +		return ret;
 +
 +	/* The cable may have gone between the check and the write: undo at once. */
-+	ret = regmap_read(chip->regmap, S2MU005_REG_CHGR_STATUS0, &status0);
-+	if (!ret && (status0 & S2MU005_CHGR_VBUS))
++	if (s2mu005l_vbus(chip) > 0)
 +		return 0;
 +	dev_warn(chip->dev, "VBUS lost while stopping charging, switching back on\n");
 +	regmap_write_bits(chip->regmap, reg, mask,
@@ -640,18 +658,25 @@ new file mode 100644
 +		if (val->intval < 0)
 +			return -EINVAL;
 +		ua = s2mu005l_fit_input(val->intval);
-+		ret = s2mu005l_set_input(chip, ua);
-+		if (!ret)
-+			chip->input_ua = ua;
-+		return ret;
++		ret = s2mu005l_vbus(chip);
++		if (ret > 0)
++			ret = s2mu005l_set_input(chip, ua);
++		if (ret < 0)
++			return ret;
++		/* Without VBUS only remembered: the poll applies it after plug-in. */
++		chip->input_ua = ua;
++		return 0;
 +	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 +		if (val->intval < 0)
 +			return -EINVAL;
 +		ua = s2mu005l_fit_charge(val->intval);
-+		ret = s2mu005l_set_charge(chip, ua);
-+		if (!ret)
-+			chip->charge_ua = ua;
-+		return ret;
++		ret = s2mu005l_vbus(chip);
++		if (ret > 0)
++			ret = s2mu005l_set_charge(chip, ua);
++		if (ret < 0)
++			return ret;
++		chip->charge_ua = ua;
++		return 0;
 +	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
 +		return s2mu005l_set_behaviour(chip, val->intval);
 +	case POWER_SUPPLY_PROP_CHARGE_CONTROL_START_THRESHOLD:
