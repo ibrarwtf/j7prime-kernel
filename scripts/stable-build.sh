@@ -51,6 +51,28 @@ mk() { make -j"$(nproc)" ARCH=arm64 LLVM=1 CC="ccache clang" KBUILD_BUILD_VERSIO
 cp ../config-stable.aarch64 .config
 ./scripts/kconfig/merge_config.sh -m .config "$frag" >/dev/null
 mk olddefconfig
+# Trimmed builds: a fragment with a "# j7-trim: lsmod=<file> [drop=<file>]" line (files next to it) is built
+# from a small config: base + fragment, then the drop fragment (best effort, not asserted), then
+# localmodconfig against the captured lsmod of the phone (every =m not loaded there goes), then the fragment
+# again (its keep-list wins). Fragments without that line (p1, p2, ...) are built exactly as before.
+trim=$(sed -n 's/^# j7-trim: //p' "$frag" | head -1)
+if [ -n "$trim" ]; then
+	tlsmod= tdrop=
+	for kv in $trim; do
+		case $kv in lsmod=*) tlsmod=$top/$BUILD_DIR/${kv#lsmod=} ;; drop=*) tdrop=$top/$BUILD_DIR/${kv#drop=} ;; esac
+	done
+	[ -f "$tlsmod" ] || { echo "::error::j7-trim: lsmod file '$tlsmod' not found"; exit 1; }
+	echo "--- j7-trim: $(grep -c '=[ym]$' .config) options set before trimming"
+	if [ -n "$tdrop" ]; then
+		[ -f "$tdrop" ] || { echo "::error::j7-trim: drop file '$tdrop' not found"; exit 1; }
+		./scripts/kconfig/merge_config.sh -m .config "$tdrop" >/dev/null
+		mk olddefconfig
+	fi
+	yes '' | mk LSMOD="$tlsmod" localmodconfig >"$OUT/localmodconfig.log" 2>&1 || { tail -20 "$OUT/localmodconfig.log"; exit 1; }
+	./scripts/kconfig/merge_config.sh -m .config "$frag" >/dev/null
+	mk olddefconfig
+	echo "--- j7-trim: $(grep -c '=y$' .config) =y, $(grep -c '=m$' .config) =m after trimming"
+fi
 bash "$top/scripts/check-config.sh" "$frag" .config
 echo "--- config changes vs config-stable.aarch64 (toolchain version symbols are expected):"
 diff ../config-stable.aarch64 .config | grep '^[<>]' | grep -v '^[<>] #$' | tee "$OUT/config.diff" || true
@@ -91,4 +113,5 @@ echo "$rel" >"$OUT/release.txt"
 	echo "j7prime patches: $(cd "$top" && ls patches/$KVER/*.patch | tr '\n' ' ')"
 	echo "compiler: $(clang --version | head -1); rustc: $(rustc --version 2>/dev/null || echo none)"
 	echo "kernelrelease: $rel"
+	echo "objects: $(find . -name '*.o' | wc -l), modules: $(find . -name '*.ko' | wc -l)"
 } | tee "$OUT/source.txt"
