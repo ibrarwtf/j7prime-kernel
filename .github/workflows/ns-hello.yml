@@ -1,0 +1,20 @@
+name: ns-hello
+# First test of Namespace runners (profile: kernelbuilds).
+on:
+  workflow_dispatch:
+  push:
+    branches: [ns-hello]
+jobs:
+  hello:
+    runs-on: namespace-profile-kernelbuilds
+    timeout-minutes: 10
+    steps:
+      - name: Hello
+        run: |
+          echo "hello world from Namespace"
+          echo "arch: $(uname -m)  kernel: $(uname -r)"
+          echo "cpus: $(nproc)"
+          free -h | sed -n 1,2p
+          df -h / | tail -1
+          . /etc/os-release && echo "os: $PRETTY_NAME"
+          docker --version || true
