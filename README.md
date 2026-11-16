@@ -34,7 +34,7 @@ gh run download <run-id> -n kernel-b1
 
 With `release=true` a device can fetch files with plain `curl -LO https://github.com/<owner>/j7prime-kernel/releases/download/<tag>/<file>`.
 
-The QEMU smoke test boots `Image` on `qemu-system-aarch64 -M virt -cpu cortex-a53` with a one-file static `/init` that prints a marker and powers off. The phone config has no PL011/virtio console and is not changed for the test; the pass signal is QEMU exiting through the guest's PSCI power-off (`panic=0` and no `-no-reboot`, so panics and reboot loops time out). It only proves the kernel reaches userspace on generic arm64; it says nothing about phone drivers.
+The QEMU smoke test boots `Image` on `qemu-system-aarch64 -M virt -cpu cortex-a53` with a one-file static `/init` that prints a marker and powers off. The phone config has no PL011/virtio console and is not changed for the test; instead QEMU pauses on the guest power-off/reset/panic (or at the 180 s timeout), the guest RAM is saved over QMP and searched for the marker (built at run time by `/init`, so it can only exist if init ran); kernel-log fragments found in RAM are printed for diagnosis. It only proves the kernel reaches userspace on generic arm64; it says nothing about phone drivers.
 
 Tested only on our own device, via `kexec -c` with the hardware watchdog armed. Use at your own risk.
 

@@ -186,27 +186,11 @@ jobs:
           (cd rd && echo init | cpio -o -H newc --quiet > ../initrd.cpio)
       - name: Boot on virt
         run: |
-          # The phone config has no PL011/virtio console. We do not change it; instead the
-          # guest's /init powers off via PSCI, which makes QEMU exit. panic=0 makes a panic
-          # hang (-> timeout), and without -no-reboot a reset reboots forever (-> timeout),
-          # so only "init ran and powered off" exits in time. If the config does have the
-          # PL011 console, the marker printed by /init must also appear on the serial line.
-          if grep -q '^CONFIG_SERIAL_AMBA_PL011_CONSOLE=y' k/config; then CON=1; APP="console=ttyAMA0 earlycon"; else CON=0; APP=""; fi
-          t0=$(date +%s); rc=0
-          timeout 180 qemu-system-aarch64 -M virt -cpu cortex-a53 -smp 2 -m 1G \
-            -kernel k/Image -initrd initrd.cpio -append "$APP panic=0 rdinit=/init" \
-            -display none -monitor none -serial file:serial.log || rc=$?
-          dt=$(( $(date +%s) - t0 ))
-          echo "--- serial (tail):"; tail -40 serial.log || true
-          if [ $rc = 0 ] && { [ $CON = 0 ] || grep -q J7CI-INIT-REACHED serial.log; }; then
-            res="PASS: init reached and powered off after ${dt}s"
-            [ $CON = 0 ] && res="$res (no PL011 console in this config: judged by PSCI power-off, marker not visible)"
-          else
-            res="FAIL: qemu rc=$rc after ${dt}s (124 = timeout: hang/panic/reboot loop before init)"
-          fi
-          echo "$res"
-          echo "### QEMU smoke \`${{ matrix.build }}\`: $res" >> "$GITHUB_STEP_SUMMARY"
-          [[ $res == PASS* ]]
+          # The phone config has no PL011/virtio console and is not changed for this test.
+          # Evidence comes from guest RAM (see scripts/qemu-smoke.py); if the config does have
+          # the PL011 console the marker must also appear on ttyAMA0.
+          grep -q '^CONFIG_SERIAL_AMBA_PL011_CONSOLE=y' k/config && CON=1 || CON=0
+          python3 scripts/qemu-smoke.py k/Image initrd.cpio 180 $CON
 
   dtb:
     needs: setup
