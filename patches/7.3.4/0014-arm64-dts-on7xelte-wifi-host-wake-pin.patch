@@ -1,0 +1,47 @@
+Subject: arm64: dts: exynos7870-on7xelte: configure the Wi-Fi host-wake pin
+
+The BCM43430 host-wake line (gpa2-2) has a pin group upstream,
+wlan_hostwake (as an output), that nothing references. Without a pin
+configuration the line reads low all the time on the SM-G610F, so the
+level-low out-of-band interrupt fires about 18000 times per second:
+every time brcmfmac reads an empty intstatus over SDIO, which keeps a
+kworker ~40 % busy and adds ~35000 function-call IPIs per second (seen
+the same on 6.15 and 7.3.4).
+
+Make the group an external interrupt input with the pull-up and apply it
+with the mmc1 pins. Measured on 7.3.4 (cable in, idle, 60 s): host-wake
+interrupts a few per second, total interrupts 550/s instead of 70000/s,
+context switches 460/s instead of 70000/s, CPU busy 0.6 % instead of
+12-16 %.
+
+(Removing the out-of-band interrupt instead, i.e. in-band SDIO
+interrupts, also stops the storm; IRQ_TYPE_LEVEL_HIGH stops the
+firmware from coming up.)
+
+Against: linux v7.3.4 + 0001-0013. License: GPL-2.0 (kernel DTS).
+
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -865,7 +865,12 @@
+ 	#size-cells = <0>;
+ 
+ 	pinctrl-names = "default";
+-	pinctrl-0 = <&sd1_clk &sd1_cmd &sd1_bus1 &sd1_bus4>;
++	/*
++	 * wlan_hostwake: the Wi-Fi host-wake line needs its EINT function and
++	 * the pull-up, otherwise it reads low all the time and the level-low
++	 * out-of-band interrupt below fires ~18000 times per second.
++	 */
++	pinctrl-0 = <&sd1_clk &sd1_cmd &sd1_bus1 &sd1_bus4 &wlan_hostwake>;
+ 
+ 	mmc-pwrseq = <&pwrseq_mmc1>;
+ 
+@@ -988,7 +993,7 @@
+ 
+ 	wlan_hostwake: wlan-hostwake-pins {
+ 		samsung,pins = "gpa2-2";
+-		samsung,pin-function = <EXYNOS_PIN_FUNC_OUTPUT>;
++		samsung,pin-function = <EXYNOS_PIN_FUNC_EINT>;
+ 		samsung,pin-pud = <EXYNOS_PIN_PULL_UP>;
+ 	};
+ };

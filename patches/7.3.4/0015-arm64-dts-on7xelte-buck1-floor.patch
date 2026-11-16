@@ -1,0 +1,33 @@
+Subject: arm64: dts: exynos7870-on7xelte: keep BUCK1 at or above the boot level
+
+Both CPU clusters run from BUCK1. cpufreq-dt makes a cluster's voltage
+request only on its first frequency change, so until then the other
+cluster can lower the shared rail under it: observed with the userspace
+governor, cluster 1 at 838.5 MHz put BUCK1 at 762.5 mV while cluster 0
+still ran the bootloader's 902.2 MHz (OPP 787.5 mV); stepping cluster 1
+further down would have gone to 675 mV. With schedutil the same window
+exists at every boot.
+
+Set the regulator minimum to 737.5 mV, the BUCK1 voltage the bootloader
+leaves at 902.2 MHz (read on this phone). The 546 and 676 MHz OPPs then
+run at 737.5 mV instead of 675/718.75 mV: above the table, never below.
+
+Against: linux v7.3.4 + 0001-0014. License: GPL-2.0 (kernel DTS).
+
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -496,7 +496,13 @@
+ 		regulators {
+ 			vdd_buck1: buck1 {
+ 				regulator-name = "vdd_buck1";
+-				regulator-min-microvolt = <500000>;
++				/*
++				 * Not below the bootloader's 902.2 MHz level: until
++				 * a cluster changes frequency it has no voltage
++				 * request on this shared rail, so the other cluster
++				 * stepping down could undervolt it.
++				 */
++				regulator-min-microvolt = <737500>;
+ 				regulator-max-microvolt = <1300000>;
+ 				regulator-ramp-delay = <12000>;
+ 				/*
