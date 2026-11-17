@@ -1,0 +1,102 @@
+Subject: soc: samsung: exynos7870-pmu: no cluster power-down during cpufreq transitions
+
+On the SM-G610F the whole SoC stops silently (no RCU-stall, soft-lockup
+or hung-task output; hardware watchdog reset) when PSCI core power-down
+(cpu-sleep) is enabled on all CPUs and frequencies change. Bench runs
+with an all-core load burst every 3 s:
+  cpu-sleep on all 8 CPUs, schedutil:          hang after 8.5 min
+  cpu-sleep off (WFI only), schedutil:         clean 30 min
+  cpu-sleep off on one core per cluster:       clean 30 min
+  cpu-sleep on all 8, frequency pinned:        clean 30 min
+so the trigger is a frequency (cluster clock / shared BUCK1 rail)
+change while all four cores of a cluster are powered down. The vendor
+kernel never lets a cluster power down during a frequency change
+(block_cpd()/release_cpd() around its DVFS).
+
+From PRECHANGE to POSTCHANGE of any policy, hold a CPU latency QoS
+request of 1 us (only WFI is allowed) and make sure, with a synchronous
+no-op IPI, that cores already powered down are back up before the clock
+or voltage moves. Transitions of the two policies can overlap, hence the
+count.
+
+Against: linux v7.3.4 + patches/7.3.4 + patches/7.3.4-deepidle/0001 +
+patches/7.3.4-deepidle-diag/0001. License: GPL-2.0.
+
+--- a/drivers/soc/samsung/exynos7870-pmu.c
++++ b/drivers/soc/samsung/exynos7870-pmu.c
+@@ -25,6 +25,9 @@
+ 
+ #include <linux/cpufreq.h>
+ #include <linux/io.h>
++#include <linux/mutex.h>
++#include <linux/pm_qos.h>
++#include <linux/smp.h>
+ 
+ #include <asm/cputype.h>
+ 
+@@ -87,6 +90,52 @@ static struct notifier_block exynos7870_ema_nb = {
+ 	.notifier_call = exynos7870_ema_cpufreq_cb,
+ };
+ 
++/*
++ * Keep every cluster out of a full power-down while a CPU frequency
++ * changes. With PSCI core power-down enabled on all CPUs, a cpufreq
++ * transition (cluster clock and the shared BUCK1 rail) that runs while
++ * all four cores of a cluster are powered down stops the whole SoC
++ * silently on the SM-G610F; the vendor kernel never lets a cluster go
++ * down during a frequency change either (block_cpd()/release_cpd()).
++ *
++ * PRECHANGE: a CPU latency QoS request of 1 us limits every CPU to WFI,
++ * and a synchronous no-op IPI makes sure the cores that are already
++ * powered down are back up before the clock or voltage moves.
++ * POSTCHANGE: the request is dropped again. Both policies can be in a
++ * transition at once, hence the count.
++ */
++static struct pm_qos_request exynos7870_freq_qos;
++static DEFINE_MUTEX(exynos7870_freq_lock);
++static unsigned int exynos7870_freq_users;
++
++static void exynos7870_noop(void *unused)
++{
++}
++
++static int exynos7870_freq_guard_cb(struct notifier_block *nb,
++				    unsigned long ev, void *data)
++{
++	mutex_lock(&exynos7870_freq_lock);
++	if (ev == CPUFREQ_PRECHANGE) {
++		if (exynos7870_freq_users++ == 0) {
++			cpu_latency_qos_update_request(&exynos7870_freq_qos, 1);
++			smp_call_function(exynos7870_noop, NULL, 1);
++		}
++	} else if (ev == CPUFREQ_POSTCHANGE && exynos7870_freq_users) {
++		if (--exynos7870_freq_users == 0)
++			cpu_latency_qos_update_request(&exynos7870_freq_qos,
++						       PM_QOS_DEFAULT_VALUE);
++	}
++	mutex_unlock(&exynos7870_freq_lock);
++
++	return NOTIFY_OK;
++}
++
++static struct notifier_block exynos7870_freq_guard_nb = {
++	.notifier_call = exynos7870_freq_guard_cb,
++	.priority = INT_MAX,	/* before anyone else sees PRECHANGE */
++};
++
+ static int exynos7870_cpu_pm_notify(struct notifier_block *nb,
+ 				    unsigned long action, void *data)
+ {
+@@ -122,6 +171,12 @@ static void exynos7870_pmu_init(void)
+ 	ema_con[1] = ioremap(0x10810330, 4);
+ 	exynos7870_log_ema("boot");
+ 	cpufreq_register_notifier(&exynos7870_ema_nb, CPUFREQ_TRANSITION_NOTIFIER);
++	cpu_latency_qos_add_request(&exynos7870_freq_qos, PM_QOS_DEFAULT_VALUE);
++	if (cpufreq_register_notifier(&exynos7870_freq_guard_nb,
++				      CPUFREQ_TRANSITION_NOTIFIER))
++		pr_warn("exynos7870-pmu: cpufreq transition guard not registered\n");
++	else
++		pr_info("exynos7870-pmu: cpufreq transition guard on (no cluster power-down during frequency changes)\n");
+ 	exynos7870_cluster_seq_off(0);
+ 	exynos7870_cluster_seq_off(1);
+ 	cpu_pm_register_notifier(&exynos7870_cpu_pm_nb);
