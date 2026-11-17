@@ -1,0 +1,75 @@
+Subject: soc: samsung: exynos7870-pmu: keep the cluster power-down sequencer off
+
+The Exynos7870 PMU can power a whole cluster (L2 and non-CPU logic) down
+by itself once all of its cores are down, when the cluster's CPU
+sequencer is enabled (CPUSEQ_OPTION bit 0, 0x2488 + cluster * 0x20).
+The vendor kernel only enables it for an explicit cluster power-down
+(its CPD state: the non-boot cluster idle for longer than the CPD
+residency, CPD not blocked by a frequency change, PSCI cluster-level
+suspend parameter so the firmware flushes L2) and switches it off again
+on wake-up and on every CPU_STARTING of that cluster
+("In case of non-boot cluster, CPU sequencer should be disabled even
+each cpu wake up through hotplug in").
+
+Mainline only has the core-level state (arm,psci-suspend-param 0x10000,
+L1 flushed by the firmware, L2 not). If the sequencer is left enabled,
+for example by the firmware's CPU_ON/CPU_OFF path, four cores of a
+cluster in that state let the PMU cut the cluster with dirty L2 lines,
+or while cpufreq is changing that cluster's clock: silent hangs or
+memory corruption with deep idle on, which is what the SM-G610F shows
+(resets after 10-70 min of deep idle, none with deep idle off).
+
+Clear the bit for the entering CPU's cluster on every CPU_PM_ENTER
+before the core is prepared, and once for both clusters at init. Log
+once if it was found set, so a test run shows whether this was the
+cause.
+
+Against: linux v7.3.4 + patches/7.3.4 0001-0017 (needs 0011).
+License: GPL-2.0.
+
+--- a/drivers/soc/samsung/exynos7870-pmu.c
++++ b/drivers/soc/samsung/exynos7870-pmu.c
+@@ -31,6 +31,24 @@
+ 	(0x2000 + ((MPIDR_AFFINITY_LEVEL(mpidr, 1) << 2 |		\
+ 		    MPIDR_AFFINITY_LEVEL(mpidr, 0)) * 0x80))
+ #define EXYNOS7870_CPU_LOCAL_PWR_CFG	GENMASK(3, 0)
++#define EXYNOS7870_CPUSEQ_OPTION(cluster)	(0x2488 + (cluster) * 0x20)
++#define EXYNOS7870_CPUSEQ_ENABLE	BIT(0)
++
++/*
++ * Only the core-level PSCI state is used, so the PMU must never power a
++ * cluster down behind the kernel's back: keep the cluster sequencer off.
++ */
++static void exynos7870_cluster_seq_off(unsigned int cluster)
++{
++	u32 offset = EXYNOS7870_CPUSEQ_OPTION(cluster);
++	u32 val = pmu_raw_readl(offset);
++
++	if (val & EXYNOS7870_CPUSEQ_ENABLE) {
++		pmu_raw_writel(val & ~EXYNOS7870_CPUSEQ_ENABLE, offset);
++		pr_info_once("exynos7870-pmu: cluster %u CPU sequencer was on (0x%08x), switched off\n",
++			     cluster, val);
++	}
++}
+
+ static int exynos7870_cpu_pm_notify(struct notifier_block *nb,
+ 				    unsigned long action, void *data)
+@@ -40,6 +58,7 @@
+
+ 	switch (action) {
+ 	case CPU_PM_ENTER:
++		exynos7870_cluster_seq_off(MPIDR_AFFINITY_LEVEL(read_cpuid_mpidr(), 1));
+ 		pmu_raw_writel(val & ~EXYNOS7870_CPU_LOCAL_PWR_CFG, offset);
+ 		break;
+ 	case CPU_PM_ENTER_FAILED:
+@@ -60,6 +79,10 @@
+
+ static void exynos7870_pmu_init(void)
+ {
++	pr_info("exynos7870-pmu: CPUSEQ_OPTION cluster0 0x%08x cluster1 0x%08x\n",
++		pmu_raw_readl(EXYNOS7870_CPUSEQ_OPTION(0)), pmu_raw_readl(EXYNOS7870_CPUSEQ_OPTION(1)));
++	exynos7870_cluster_seq_off(0);
++	exynos7870_cluster_seq_off(1);
+ 	cpu_pm_register_notifier(&exynos7870_cpu_pm_nb);
+ }
+
