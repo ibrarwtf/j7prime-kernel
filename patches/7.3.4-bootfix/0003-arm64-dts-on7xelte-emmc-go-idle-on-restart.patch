@@ -1,0 +1,20 @@
+Subject: arm64: dts: exynos7870-on7xelte: eMMC to idle on restart
+
+Opt the eMMC host into the CMD0-on-restart behaviour of the previous
+patch: vmmc/vqmmc are always-on and RST_n_FUNCTION is not enabled on this
+board, so nothing else returns the device to its power-up state between
+Linux and the boot loaders. Without 0002 the property is ignored.
+
+Against: linux v7.3.4 + 0001-0017 + 0001-0002 of this directory.
+License: GPL-2.0 (kernel DTS).
+
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -862,6 +862,7 @@
+ 	samsung,dw-mshc-sdr-timing = <0 4>;
+ 	samsung,dw-mshc-ddr-timing = <2 4>;
+ 	non-removable;
++	mmc-go-idle-on-restart;
+
+ 	status = "okay";
+ };

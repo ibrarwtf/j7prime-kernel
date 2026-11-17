@@ -1,0 +1,79 @@
+Subject: mmc: core: optionally send the eMMC to idle (CMD0) on restart
+
+On a restart, mmc_shutdown() flushes the cache, sends a power-off
+notification (POWER_OFF_LONG) and turns the host off. That assumes the
+power goes away next. On the SM-G610F it does not: vmmc (LDO26) and vqmmc
+(LDO27) are always-on, there is no power switch or pwrseq for the eMMC,
+and RST_n_FUNCTION (EXT_CSD[162]) is 0, so hardware reset is not usable
+either. The SoC is reset, the PMIC is not, and the boot ROM, the vendor
+loader and U-Boot meet the device in whatever state Linux left it in,
+including a high-speed timing (DDR52/HS200) and an outstanding power-off
+notification.
+
+With the opt-in property "mmc-go-idle-on-restart" on the host node, end
+a restart (system_state == SYSTEM_RESTART, not a power-off) with the
+host back at legacy timing, 1-bit bus and the identification clock,
+followed by CMD0 (GO_IDLE_STATE) instead of the power-off notification.
+CMD0 resets HS_TIMING, BUS_WIDTH and POWER_OFF_NOTIFICATION, i.e. the
+device is in the same state as after power-up. The cache flush before it
+is unchanged. A power-off still sends the notification.
+
+Status: experiment for the boot-failure investigation (failures seen
+after clean restarts from kernels running the eMMC at DDR52). Not proven
+to change anything yet; see the test plan in the results file. Logs one
+line per restart ("restart: device sent to idle (CMD0)").
+
+Against: linux v7.3.4 + 0001-0017. License: GPL-2.0.
+
+--- a/drivers/mmc/core/mmc.c
++++ b/drivers/mmc/core/mmc.c
+@@ -2134,6 +2134,23 @@ static int _mmc_flush_cache(struct mmc_host *host)
+ 	return err;
+ }
+
++/*
++ * Boards whose eMMC supplies are always on and which have no usable RST_n
++ * (RST_n_FUNCTION not enabled) never power cycle the device on a restart:
++ * the next boot stage finds it exactly as Linux left it. With the opt-in
++ * property "mmc-go-idle-on-restart" on the host node, a restart ends with
++ * CMD0 instead of a power-off notification.
++ */
++static bool mmc_go_idle_on_restart(struct mmc_host *host,
++				   enum mmc_poweroff_type pm_type)
++{
++	return pm_type == MMC_POWEROFF_SHUTDOWN &&
++	       system_state == SYSTEM_RESTART &&
++	       !mmc_host_is_spi(host) && host->parent &&
++	       of_property_read_bool(host->parent->of_node,
++				     "mmc-go-idle-on-restart");
++}
++
+ static int _mmc_suspend(struct mmc_host *host, enum mmc_poweroff_type pm_type)
+ {
+ 	unsigned int notify_type = EXT_CSD_POWER_OFF_SHORT;
+@@ -2157,7 +2174,24 @@ static int _mmc_suspend(struct mmc_host *host, enum mmc_poweroff_type pm_type)
+ 			goto out;
+ 	}
+
+-	if (mmc_card_can_poweroff_notify(host->card) &&
++	if (mmc_go_idle_on_restart(host, pm_type)) {
++		/*
++		 * VCC stays on across this restart, so a power-off
++		 * notification would never be followed by the power loss it
++		 * announces. Put the device back into the state the boot ROM
++		 * and boot loaders expect after power-up instead: host side
++		 * to legacy timing, 1-bit, identification clock, then CMD0,
++		 * which resets HS_TIMING, BUS_WIDTH and
++		 * POWER_OFF_NOTIFICATION on the device.
++		 */
++		mmc_set_timing(host, MMC_TIMING_LEGACY);
++		mmc_set_bus_width(host, MMC_BUS_WIDTH_1);
++		mmc_set_clock(host, host->f_init);
++		err = mmc_go_idle(host);
++		pr_info("%s: restart: device sent to idle (CMD0), err %d\n",
++			mmc_hostname(host), err);
++		err = 0;
++	} else if (mmc_card_can_poweroff_notify(host->card) &&
+ 	    mmc_host_can_poweroff_notify(host, pm_type))
+ 		err = mmc_poweroff_notify(host->card, notify_type);
+ 	else if (mmc_card_can_sleep(host->card))

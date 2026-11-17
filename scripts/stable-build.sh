@@ -44,9 +44,24 @@ for p in "$top"/patches/$KVER/*.patch; do
 	patch -p1 --no-backup-if-mismatch <"$p"
 	n=$((n + 1))
 done
+# optional extra patch directories for this build id (one per line, relative to patches/), applied after
+# patches/$KVER: lets an experiment reuse the p2 config (and its ccache) without touching the default set
+extra="$top/$BUILD_DIR/$BUILD.patchdirs"
+if [ -f "$extra" ]; then
+	for d in $(grep -v '^#' "$extra"); do
+		for p in "$top"/patches/$d/*.patch; do
+			[ -e "$p" ] || { echo "::error::no patches in patches/$d"; exit 1; }
+			echo "== ${p#$top/}"
+			patch -p1 --no-backup-if-mismatch <"$p"
+			n=$((n + 1))
+		done
+	done
+fi
 echo "applied $n j7prime patches"
+# optional make LOCALVERSION suffix (not CONFIG_LOCALVERSION: that would change autoconf.h and miss ccache)
+LV=$(cat "$top/$BUILD_DIR/$BUILD.localversion" 2>/dev/null || true)
 
-mk() { make -j"$(nproc)" ARCH=arm64 LLVM=1 CC="ccache clang" KBUILD_BUILD_VERSION="$((pkgrel + 1))-$BUILD" "$@"; }
+mk() { make -j"$(nproc)" ARCH=arm64 LLVM=1 CC="ccache clang" KBUILD_BUILD_VERSION="$((pkgrel + 1))-$BUILD" ${LV:+LOCALVERSION=$LV} "$@"; }
 
 cp ../config-stable.aarch64 .config
 ./scripts/kconfig/merge_config.sh -m .config "$frag" >/dev/null
@@ -68,6 +83,8 @@ case "$rel" in *-"$BUILD"*|*-j7"$BUILD"*) ;; *) echo "::warning::kernelrelease '
 # fail fast: the DTB and our two drivers before the long build
 mk exynos/exynos7870-on7xelte.dtb
 mk drivers/power/supply/s2mu005_fg.o drivers/input/keyboard/mip4_touchkey.o
+fc=$(grep -v '^#' "$top/$BUILD_DIR/$BUILD.fastcheck" 2>/dev/null || true)
+[ -z "$fc" ] || mk $fc
 echo "fast checks OK at $(date -u +%H:%M:%S)"
 
 mk Image modules

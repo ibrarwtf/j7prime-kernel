@@ -1,0 +1,34 @@
+Subject: arm64: dts: exynos7870-on7xelte: protect the ramoops zones with ECC
+
+The ramoops zone headers lose records across resets on the SM-G610F. The
+boot after a reset regularly logs "ramoops: found existing invalid
+buffer" with the right signature but start/size words that have single
+extra bits set, for example size 16384 / start 4194304, size 0 / start
+64, size 67108864 / start 0. The same bit positions (6, 14, 22, 24, 26)
+come back across many boots, on 6.15 and 7.3.4 kernels, after clean
+reboots and after watchdog resets alike: a few DRAM cells in this region
+do not keep their value through the reset. One flipped header bit is
+enough for ramoops to drop the whole zone, so a crash or hang that
+happened before the reset leaves no record at all, and "no pstore record"
+says nothing about how far the previous boot got.
+
+Add Reed-Solomon ECC (16 bytes per 128-byte block) to every zone. It
+corrects the header and the text, and the kernel reports how many bytes
+it corrected ("ramoops: ECC: N Corrected bytes"), which also measures
+the flip rate. Costs about 11 % of each zone.
+
+The 16 KiB dmesg record is no longer readable by kernels without ECC in
+their ramoops node (6.15 is out of the boot menu).
+
+Against: linux v7.3.4 + 0001-0017. License: GPL-2.0 (kernel DTS).
+
+--- a/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
++++ b/arch/arm64/boot/dts/exynos/exynos7870-on7xelte.dts
+@@ -308,6 +308,7 @@
+ 			console-size = <0x38000>;
+ 			pmsg-size = <0x4000>;
+ 			max-reason = <4>;	/* KMSG_DUMP_SHUTDOWN */
++			ecc-size = <16>;
+ 		};
+
+ 		cont_splash_mem: framebuffer@67000000 {
