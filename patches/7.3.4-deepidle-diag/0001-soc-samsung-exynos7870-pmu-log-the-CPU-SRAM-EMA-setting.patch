@@ -1,0 +1,79 @@
+Subject: soc: samsung: exynos7870-pmu: log the CPU SRAM EMA setting (diagnostics)
+
+The vendor kernel programs the CPU clusters' SRAM extra-margin setting
+(CPUCLx_EMA_CON, SYSREG_CPUCLx + 0x330) on every voltage change:
+0x12492 below 950 mV, the fused value from 950 mV up. Mainline never
+touches it. Log what the boot loader left, and the value after the
+first four cpufreq transitions, to see whether the cores run at
+737.5-925 mV with a margin meant for >= 950 mV. Read-only.
+
+Diagnostics for the deep-idle hang hunt, not for merging.
+Against: linux v7.3.4 + patches/7.3.4 + patches/7.3.4-deepidle/0001.
+License: GPL-2.0.
+
+
+
+--- a/drivers/soc/samsung/exynos7870-pmu.c
++++ b/drivers/soc/samsung/exynos7870-pmu.c
+@@ -23,6 +23,9 @@
+ #include <linux/notifier.h>
+ #include <linux/soc/samsung/exynos-pmu.h>
+ 
++#include <linux/cpufreq.h>
++#include <linux/io.h>
++
+ #include <asm/cputype.h>
+ 
+ #include "exynos-pmu.h"
+@@ -50,6 +53,40 @@ static void exynos7870_cluster_seq_off(unsigned int cluster)
+ 	}
+ }
+ 
++/*
++ * Diagnostics (j7prime deep-idle hang hunt): the vendor pwrcal programs the
++ * CPU SRAM EMA (CPUCLx_EMA_CON, SYSREG_CPUCLx + 0x330) on every voltage
++ * change: 0x12492 below 950 mV, the fused value from 950 mV up. Log what
++ * the boot loader left, and the value after the first cpufreq transitions.
++ */
++static void __iomem *ema_con[2];
++
++static void exynos7870_log_ema(const char *when)
++{
++	if (ema_con[0] && ema_con[1])
++		pr_info("exynos7870-pmu: %s: CPUCL0_EMA_CON 0x%08x CPUCL1_EMA_CON 0x%08x\n",
++			when, readl(ema_con[0]), readl(ema_con[1]));
++}
++
++static int exynos7870_ema_cpufreq_cb(struct notifier_block *nb,
++				     unsigned long ev, void *data)
++{
++	static atomic_t logged = ATOMIC_INIT(0);
++	struct cpufreq_freqs *f = data;
++	char buf[64];
++
++	if (ev == CPUFREQ_POSTCHANGE && atomic_inc_return(&logged) <= 4) {
++		snprintf(buf, sizeof(buf), "after cpu%u %u->%u kHz",
++			 f->policy->cpu, f->old, f->new);
++		exynos7870_log_ema(buf);
++	}
++	return NOTIFY_OK;
++}
++
++static struct notifier_block exynos7870_ema_nb = {
++	.notifier_call = exynos7870_ema_cpufreq_cb,
++};
++
+ static int exynos7870_cpu_pm_notify(struct notifier_block *nb,
+ 				    unsigned long action, void *data)
+ {
+@@ -81,6 +118,10 @@ static void exynos7870_pmu_init(void)
+ {
+ 	pr_info("exynos7870-pmu: CPUSEQ_OPTION cluster0 0x%08x cluster1 0x%08x\n",
+ 		pmu_raw_readl(EXYNOS7870_CPUSEQ_OPTION(0)), pmu_raw_readl(EXYNOS7870_CPUSEQ_OPTION(1)));
++	ema_con[0] = ioremap(0x10910330, 4);
++	ema_con[1] = ioremap(0x10810330, 4);
++	exynos7870_log_ema("boot");
++	cpufreq_register_notifier(&exynos7870_ema_nb, CPUFREQ_TRANSITION_NOTIFIER);
+ 	exynos7870_cluster_seq_off(0);
+ 	exynos7870_cluster_seq_off(1);
+ 	cpu_pm_register_notifier(&exynos7870_cpu_pm_nb);
